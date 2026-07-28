@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart-Form — 截图流 Spike 观察端</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* 顶栏 */
+    header {
+      background: #1a1a1a;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border-bottom: 1px solid #333;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 15px; font-weight: 600; color: #fff; }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #555; transition: background 0.3s;
+    }
+    .status-dot.connected { background: #34a853; }
+    .status-dot.receiving { background: #fbbc04; animation: pulse 0.5s ease-in-out; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+    #status-text { font-size: 12px; color: #888; }
+
+    /* 统计栏 */
+    .stats {
+      display: flex; gap: 24px; margin-left: auto;
+      font-size: 12px; color: #888;
+    }
+    .stats span { color: #ccc; font-weight: 500; }
+
+    /* 主内容区 */
+    main {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      background: #111;
+    }
+
+    /* 截图展示 */
+    #screenshot-container {
+      position: relative;
+      max-width: 100%;
+      max-height: 100%;
+      border: 1px solid #333;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #screenshot {
+      display: block;
+      max-width: calc(100vw - 40px);
+      max-height: calc(100vh - 120px);
+      object-fit: contain;
+    }
+
+    /* 覆盖信息层（模拟 B/S 工作区的控制者状态）*/
+    .overlay {
+      position: absolute;
+      top: 8px; left: 8px; right: 8px;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      pointer-events: none;
+    }
+    .control-badge {
+      background: rgba(26,26,26,0.9);
+      border: 1px solid #34a853;
+      color: #34a853;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+    .url-badge {
+      background: rgba(26,26,26,0.85);
+      border: 1px solid #333;
+      color: #ccc;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 3px;
+      max-width: 300px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* 占位提示 */
+    #placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      color: #444;
+    }
+    #placeholder svg { opacity: 0.4; }
+    #placeholder p { font-size: 14px; }
+
+    /* 底栏 */
+    footer {
+      background: #1a1a1a;
+      border-top: 1px solid #333;
+      padding: 8px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 12px;
+      color: #666;
+      flex-shrink: 0;
+    }
+    footer .tag {
+      background: #2a2a2a;
+      border: 1px solid #333;
+      padding: 2px 8px;
+      border-radius: 3px;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="status-dot" id="status-dot"></div>
+    <h1>Smart-Form 截图流 Spike 观察端</h1>
+    <span id="status-text">未连接</span>
+    <div class="stats">
+      <div>帧序号：<span id="frame-seq">—</span></div>
+      <div>帧大小：<span id="frame-size">—</span></div>
+      <div>延迟：<span id="frame-latency">—</span></div>
+      <div>总帧数：<span id="total-frames">0</span></div>
+    </div>
+  </header>
+
+  <main>
+    <div id="placeholder">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="2" y="3" width="20" height="14" rx="2"/>
+        <path d="M8 21h8M12 17v4"/>
+      </svg>
+      <p>等待截图流连接...</p>
+      <p style="font-size:12px; color:#333">确保 02_screenshot_stream.py server 和 sender 均已运行</p>
+    </div>
+    <div id="screenshot-container" style="display:none">
+      <img id="screenshot" alt="浏览器截图" draggable="false">
+      <div class="overlay">
+        <div class="control-badge">🤖 AGENT_CONTROL</div>
+        <div class="url-badge" id="url-display">—</div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <span class="tag">只读模式</span>
+    <span class="tag">不可注入输入事件</span>
+    <span id="fps-display">FPS: —</span>
+    <span style="margin-left:auto">ws://localhost:8765</span>
+  </footer>
+
+  <script>
+    const WS_URL = 'ws://localhost:8765';
+    const dot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const placeholder = document.getElementById('placeholder');
+    const screenshotContainer = document.getElementById('screenshot-container');
+    const screenshot = document.getElementById('screenshot');
+    const frameSeqEl = document.getElementById('frame-seq');
+    const frameSizeEl = document.getElementById('frame-size');
+    const latencyEl = document.getElementById('frame-latency');
+    const totalFramesEl = document.getElementById('total-frames');
+    const fpsDisplay = document.getElementById('fps-display');
+    const urlDisplay = document.getElementById('url-display');
+
+    let totalFrames = 0;
+    let fpsCount = 0;
+    let lastFpsTime = Date.now();
+
+    // FPS 计算
+    setInterval(() => {
+      const now = Date.now();
+      const elapsed = (now - lastFpsTime) / 1000;
+      fpsDisplay.textContent = `FPS: ${(fpsCount / elapsed).toFixed(1)}`;
+      fpsCount = 0;
+      lastFpsTime = now;
+    }, 1000);
+
+    function decodeFrameHeader(buffer) {
+      const view = new DataView(buffer);
+      // magic: 4B, version: 1B, flags: 1B, seq: 4B, ts_ms: 8B (BigInt), w: 2B, h: 2B
+      const magic = String.fromCharCode(
+        view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3)
+      );
+      if (magic !== 'SMFR') return null;
+
+      const frameSeq = view.getUint32(6, false);  // big-endian
+      const tsMsHigh = view.getUint32(10, false);
+      const tsMsLow = view.getUint32(14, false);
+      const capturedAt = tsMsHigh * 2**32 + tsMsLow;
+      const width = view.getUint16(18, false);
+      const height = view.getUint16(20, false);
+      const taskIdLen = view.getUint32(22, false);
+      // task id: 26..26+taskIdLen
+      const imgLenOffset = 26 + taskIdLen;
+      const imgLen = view.getUint32(imgLenOffset, false);
+      const imgStart = imgLenOffset + 4;
+      const imageBytes = buffer.slice(imgStart, imgStart + imgLen);
+
+      return { frameSeq, capturedAt, width, height, imageBytes };
+    }
+
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        dot.className = 'status-dot connected';
+        statusText.textContent = '已连接，等待截图帧...';
+        ws.send(JSON.stringify({ type: 'observer.hello', clientType: 'browser' }));
+      };
+
+      ws.onmessage = (event) => {
+        if (!(event.data instanceof ArrayBuffer)) return;
+
+        const receiveTime = Date.now();
+        const frame = decodeFrameHeader(event.data);
+        if (!frame) return;
+
+        // 显示截图
+        const blob = new Blob([frame.imageBytes], { type: 'image/jpeg' });
+        const url = URL.createObjectURL(blob);
+        const oldUrl = screenshot.src;
+        screenshot.src = url;
+        if (oldUrl) URL.revokeObjectURL(oldUrl);
+
+        // 显示容器
+        placeholder.style.display = 'none';
+        screenshotContainer.style.display = 'block';
+
+        // 更新统计
+        totalFrames++;
+        fpsCount++;
+        const latency = receiveTime - frame.capturedAt;
+
+        frameSeqEl.textContent = frame.frameSeq;
+        frameSizeEl.textContent = `${(event.data.byteLength / 1024).toFixed(1)} KB`;
+        latencyEl.textContent = `${latency} ms`;
+        totalFramesEl.textContent = totalFrames;
+
+        dot.className = 'status-dot receiving';
+        statusText.textContent = `接收中 — 帧 #${frame.frameSeq} (${frame.width}×${frame.height})`;
+
+        setTimeout(() => {
+          if (dot.className.includes('receiving')) {
+            dot.className = 'status-dot connected';
+          }
+        }, 300);
+      };
+
+      ws.onclose = () => {
+        dot.className = 'status-dot';
+        statusText.textContent = '连接断开，3秒后重连...';
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        statusText.textContent = '连接失败';
+        ws.close();
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "@smart-form/playwright-runner",
+  "version": "0.1.0",
+  "description": "Smart Form Playwright Replay Runner Subprocess Engine",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@smart-form/capability-sdk": "workspace:*",
+    "playwright": "^1.50.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,17 +1,17 @@
 {
   "name": "@smart-form/task-schema",
   "version": "0.1.0",
-  "private": true,
-  "description": "任务定义 Schema（含 mode: read|write）",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "description": "Smart Form Task Definition & Zod Schemas",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -b",
-    "clean": "rimraf dist *.tsbuildinfo",
-    "typecheck": "tsc --noEmit"
+    "clean": "tsc -b --clean"
   },
   "dependencies": {
-    "@smart-form/contracts": "workspace:*",
-    "zod": "^3.25.0"
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
   }
 }

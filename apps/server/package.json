@@ -1,0 +1,19 @@
+{
+  "name": "@smart-form/server",
+  "version": "0.1.0",
+  "description": "Smart Form NestJS Server Core & Capability Search Router",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@smart-form/capability-sdk": "workspace:*",
+    "@smart-form/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,49 +1,57 @@
-/**
- * @smart-form/task-schema
- *
- * 任务定义的扩展 Schema 与校验工具。
- * 基础类型来自 @smart-form/contracts，此包提供：
- * - 任务创建请求的完整校验
- * - mode 字段的运行时守卫
- * - 任务定义的 JSON Schema 导出（供 Sidecar 使用）
- */
-
-import {
-  TaskDefinition,
-  TaskMode,
-  type TaskSummary,
-} from '@smart-form/contracts';
+import { z } from "zod";
 
 /**
- * 校验任务定义是否合法
+ * 任务运行模式：
+ * - read: 采集模式（MVP）
+ * - write: 填报模式（后续扩展）
  */
-export function validateTaskDefinition(input: unknown): TaskDefinition {
-  return TaskDefinition.parse(input);
-}
+export const TaskModeSchema = z.enum(["read", "write"]);
+export type TaskMode = z.infer<typeof TaskModeSchema>;
 
 /**
- * 守卫：任务模式在创建时锁定，不可动态切换
- * 用于 XState 状态机 guard
+ * 采集字段定义 Schema
  */
-export function isReadMode(task: TaskSummary): boolean {
-  return task.mode === 'read';
-}
-
-export function isWriteMode(task: TaskSummary): boolean {
-  return task.mode === 'write';
-}
+export const FieldDefinitionSchema = z.object({
+  name: z.string().min(1, "字段名称不能为空"),
+  label: z.string(),
+  type: z.enum(["string", "number", "boolean", "date", "url", "image"]).default("string"),
+  required: z.boolean().default(false),
+  description: z.string().optional(),
+});
+export type FieldDefinition = z.infer<typeof FieldDefinitionSchema>;
 
 /**
- * 根据 mode 判断是否允许进入指定状态
- * 阻止读模式任务进入 FILLING，写模式任务进入 COLLECTING
+ * 预算约束配置 Schema
  */
-export function canEnterState(
-  task: TaskSummary,
-  targetState: string,
-): boolean {
-  if (task.mode === 'read' && targetState === 'FILLING') return false;
-  if (task.mode === 'write' && targetState === 'COLLECTING') return false;
-  return true;
-}
+export const TaskBudgetSchema = z.object({
+  maxSteps: z.number().int().positive().default(100),
+  stepTimeoutMs: z.number().int().positive().default(30000),
+  totalTimeoutMs: z.number().int().positive().default(1800000), // 30 分钟
+  maxCostUsd: z.number().positive().default(1.0),
+});
+export type TaskBudget = z.infer<typeof TaskBudgetSchema>;
 
-export { TaskDefinition, TaskMode } from '@smart-form/contracts';
+/**
+ * 完整任务定义 Schema
+ */
+export const TaskDefinitionSchema = z.object({
+  id: z.string().uuid().or(z.string().min(1)),
+  tenantId: z.string().default("default_tenant"),
+  workspaceId: z.string().default("default_workspace"),
+  title: z.string().min(1, "任务标题不能为空"),
+  mode: TaskModeSchema.default("read"),
+  targetUrl: z.string().url("目标必须是有效 URL"),
+  description: z.string(),
+  fields: z.array(FieldDefinitionSchema).min(1, "至少需要定义一个采集字段"),
+  budget: TaskBudgetSchema.default({}),
+  createdAt: z.number().default(() => Date.now()),
+  updatedAt: z.number().default(() => Date.now()),
+});
+export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
+
+/**
+ * 校验帮助函数
+ */
+export function validateTaskDefinition(data: unknown): TaskDefinition {
+  return TaskDefinitionSchema.parse(data);
+}

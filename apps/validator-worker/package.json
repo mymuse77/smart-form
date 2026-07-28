@@ -1,0 +1,17 @@
+{
+  "name": "@smart-form/validator-worker",
+  "version": "0.1.0",
+  "description": "Smart Form Capability Pack Static Security Scan Worker",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "typescript": "^5.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0"
+  }
+}

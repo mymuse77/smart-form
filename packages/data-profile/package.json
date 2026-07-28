@@ -1,0 +1,17 @@
+{
+  "name": "@smart-form/data-profile",
+  "version": "0.1.0",
+  "description": "Smart Form DataSource Profile & Safe Field Transforms (No Eval)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@smart-form/test-sites",
+  "version": "0.1.0",
+  "description": "Smart Form Controlled Test Sites (Mock Target Sites)",
+  "private": true,
+  "scripts": {
+    "dev": "serve . -p 8080 --single",
+    "start": "serve . -p 8080"
+  },
+  "devDependencies": {
+    "serve": "^14.2.3"
+  }
+}

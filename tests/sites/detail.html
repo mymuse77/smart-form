@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>测试靶场 3：产品资质审核 (列表+详情)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #1a1a1a; padding: 24px; }
+    .container { max-width: 1000px; margin: 0 auto; background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    h1 { font-size: 20px; margin-bottom: 16px; color: #1a1a1a; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border-bottom: 1px solid #e8e8e8; padding: 12px; text-align: left; font-size: 14px; }
+    th { background: #fafafa; color: #5f6368; font-weight: 600; }
+    .action-btn { color: #1a1a1a; text-decoration: underline; cursor: pointer; background: none; border: none; font-size: 13px; font-weight: 500; }
+
+    /* 弹窗样式 */
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; }
+    .modal-overlay.active { display: flex; }
+    .modal-card { background: #fff; padding: 24px; width: 480px; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
+    .modal-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+    .detail-item { font-size: 14px; margin-bottom: 10px; display: flex; }
+    .detail-item .label { width: 100px; color: #666; font-weight: 500; }
+    .modal-footer { margin-top: 20px; text-align: right; }
+    .close-btn { padding: 6px 16px; background: #e8e8e8; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>智能表单采集测试 — 软件产品资质认证 (列表+详情)</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>软件名称</th>
+          <th>版本号</th>
+          <th>申请单位</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Smart-Form 智能采集平台</td>
+          <td>V1.0.0</td>
+          <td>极智云图科技有限公司</td>
+          <td><button class="action-btn" onclick="openDetail('Smart-Form 智能采集平台', 'V1.0.0', '极智云图科技有限公司', 'CERT-2026-8801', '软件著作权+信创认证', '通过')">查看详情</button></td>
+        </tr>
+        <tr>
+          <td>DeepGuard 网络防泄密系统</td>
+          <td>V3.2.1</td>
+          <td>恒信数安网络基础设施有限公司</td>
+          <td><button class="action-btn" onclick="openDetail('DeepGuard 网络防泄密系统', 'V3.2.1', '恒信数安网络基础设施有限公司', 'CERT-2026-8802', '等保三级认证', '通过')">查看详情</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 详情弹窗 -->
+  <div class="modal-overlay" id="detail-modal">
+    <div class="modal-card">
+      <div class="modal-title" id="m-name">产品详情</div>
+      <div class="detail-item"><span class="label">版本号:</span><span id="m-ver">-</span></div>
+      <div class="detail-item"><span class="label">申请单位:</span><span id="m-company">-</span></div>
+      <div class="detail-item"><span class="label">证书编号:</span><span id="m-code">-</span></div>
+      <div class="detail-item"><span class="label">认证范围:</span><span id="m-scope">-</span></div>
+      <div class="detail-item"><span class="label">审核状态:</span><span id="m-status">-</span></div>
+      <div class="modal-footer">
+        <button class="close-btn" onclick="closeDetail()">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function openDetail(name, ver, company, code, scope, status) {
+      document.getElementById('m-name').textContent = name;
+      document.getElementById('m-ver').textContent = ver;
+      document.getElementById('m-company').textContent = company;
+      document.getElementById('m-code').textContent = code;
+      document.getElementById('m-scope').textContent = scope;
+      document.getElementById('m-status').textContent = status;
+      document.getElementById('detail-modal').classList.add('active');
+    }
+
+    function closeDetail() {
+      document.getElementById('detail-modal').classList.remove('active');
+    }
+  </script>
+</body>
+</html>
