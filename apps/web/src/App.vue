@@ -7,7 +7,7 @@
       @resume="onResume"
     />
     <div class="main-body">
-      <ChatPanel @send-task="onSendTask" />
+      <ChatPanel ref="chatPanelRef" @send-task="onSendTask" />
       <WorkspacePanel :current-url="currentUrl" :frame-src="frameSrc" />
       <ExecutionPanel :steps="steps" />
     </div>
@@ -33,6 +33,7 @@ const frameSrc = ref('');
 const collectedCount = ref(4);
 const errorCount = ref(0);
 const runtimeStr = ref('00:02:15');
+const chatPanelRef = ref<any>(null);
 
 const steps = ref<ExecutionStep[]>([
   { action: '连接本地 Chromium 独立 Profile 成功', status: 'SUCCESS' },
@@ -47,9 +48,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  if (socket) {
-    socket.close();
-  }
+  if (socket) socket.close();
 });
 
 function connectWebSocket() {
@@ -58,7 +57,7 @@ function connectWebSocket() {
     socket.binaryType = 'arraybuffer';
 
     socket.onopen = () => {
-      console.log('✅ 成功连接至本地 Agent 截图流与事件 WebSocket 服务 (ws://localhost:8765)');
+      console.log('✅ 成功连接至本地 Agent WebSocket (ws://localhost:8765)');
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'observer.hello', client: 'web-frontend' }));
       }
@@ -66,13 +65,10 @@ function connectWebSocket() {
 
     socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        // 二进制截图帧解析：剥离 26 字节 Header 得到 Raw Image Bytes，或直接作为 JPEG/WebP 渲染
         const buffer = event.data;
-        // 如果数据包含 SMFR 魔法头，则尝试寻找 Image 偏移量；否则直接转 Blob
         const uint8 = new Uint8Array(buffer);
         let imageBytes = uint8;
 
-        // 检查 SMFR (83, 77, 70, 82) 魔法字头
         if (uint8.length > 30 && uint8[0] === 83 && uint8[1] === 77 && uint8[2] === 70 && uint8[3] === 82) {
           const view = new DataView(buffer);
           const taskIdLen = view.getUint32(22);
@@ -88,24 +84,48 @@ function connectWebSocket() {
       } else if (typeof event.data === 'string') {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.url) currentUrl.value = msg.url;
+          if (msg.type === 'url_changed' && msg.url) {
+            currentUrl.value = msg.url;
+          } else if (msg.type === 'task_result') {
+            handleTaskResult(msg);
+          }
         } catch {
           // ignore
         }
       }
     };
 
-    socket.onerror = (err) => {
-      console.warn('⚠ WebSocket 握手尝试未连通 (请确保 Agent 后台进程正在运行):', err);
-    };
-
     socket.onclose = () => {
-      // 5 秒重连机制
       setTimeout(connectWebSocket, 5000);
     };
   } catch (err) {
     console.error('WebSocket 初始化异常:', err);
   }
+}
+
+function handleTaskResult(msg: any) {
+  const items = msg.items || [];
+  collectedCount.value = items.length;
+
+  let replyHtml = `<strong>🎉 采集完成！成功提取到 ${items.length} 条数据：</strong><ol style="margin-top:6px;padding-left:18px;">`;
+  items.forEach((item: any) => {
+    replyHtml += `<li style="margin-bottom:4px;"><strong>${escapeHtml(item.title)}</strong></li>`;
+  });
+  replyHtml += `</ol>`;
+
+  if (chatPanelRef.value?.addAssistantReply) {
+    chatPanelRef.value.addAssistantReply(replyHtml);
+  }
+
+  steps.value.push({
+    action: `成功完成采集！提取出 ${items.length} 条项目数据并已回传 Chat 聊天框`,
+    locator: `page.query_selector_all(...)`,
+    status: 'SUCCESS',
+  });
+}
+
+function escapeHtml(str: string): string {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function onPause() {
@@ -122,7 +142,7 @@ function onTakeover() {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: 'control', action: 'takeover' }));
   } else {
-    alert('已记录接管请求！在本地 Agent 完整运行模式下，系统将自动通过 Win32 API 聚焦前台窗口。');
+    alert('已记录接管请求！');
   }
 }
 
@@ -135,7 +155,6 @@ function onResume() {
 }
 
 function onSendTask(taskText: string) {
-  // 解析用户输入的目标 URL（若有）
   const matchUrl = taskText.match(/https?:\/\/[^\s]+/);
   if (matchUrl) {
     currentUrl.value = matchUrl[0];
@@ -154,16 +173,6 @@ function onSendTask(taskText: string) {
       timestamp: Date.now()
     }));
   }
-
-  // 模拟 Agent 分析并产生动作
-  setTimeout(() => {
-    steps.value.push({
-      action: `AI 分析完成，匹配表格提取定位器: getByRole("table") -> 包含 4 行项目`,
-      locator: 'page.getByRole("table")',
-      status: 'SUCCESS',
-    });
-    collectedCount.value = 4;
-  }, 1200);
 }
 </script>
 

@@ -1,10 +1,10 @@
 <template>
   <aside class="chat-panel">
     <div class="panel-header">对话指引与任务草稿</div>
-    <div class="messages">
+    <div class="messages" ref="msgContainer">
       <div v-for="(msg, idx) in messages" :key="idx" class="msg-bubble" :class="msg.role">
         <div class="sender">{{ msg.role === 'user' ? '用户' : 'Agent Assistant' }}</div>
-        <div class="content">{{ msg.text }}</div>
+        <div class="content" v-html="msg.text"></div>
       </div>
     </div>
     <div class="input-box">
@@ -20,9 +20,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, nextTick } from 'vue';
 
-interface Message {
+export interface Message {
   role: 'user' | 'assistant';
   text: string;
 }
@@ -32,6 +32,7 @@ const messages = ref<Message[]>([
 ]);
 
 const inputText = ref('');
+const msgContainer = ref<HTMLElement | null>(null);
 
 const emit = defineEmits(['send-task']);
 
@@ -40,7 +41,25 @@ function send() {
   messages.value.push({ role: 'user', text: inputText.value });
   emit('send-task', inputText.value);
   inputText.value = '';
+  scrollToBottom();
 }
+
+function addAssistantReply(text: string) {
+  messages.value.push({ role: 'assistant', text });
+  scrollToBottom();
+}
+
+function scrollToBottom() {
+  nextTick(() => {
+    if (msgContainer.value) {
+      msgContainer.value.scrollTop = msgContainer.value.scrollHeight;
+    }
+  });
+}
+
+defineExpose({
+  addAssistantReply,
+});
 </script>
 
 <style scoped>
@@ -70,7 +89,7 @@ function send() {
   font-size: 13px;
   padding: 8px 12px;
   border-radius: 6px;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 .msg-bubble.assistant { background: #f0f0f0; color: #333; }
 .msg-bubble.user { background: #1a1a1a; color: #fff; align-self: flex-end; }
