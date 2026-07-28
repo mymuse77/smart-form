@@ -1,0 +1,16 @@
+{
+  "name": "@smart-form/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "共享 DTO、事件、消息类型与核心接口定义",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist *.tsbuildinfo",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  }
+}

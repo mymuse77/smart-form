@@ -1,0 +1,102 @@
+import { z } from 'zod';
+
+// ─── 任务模式 ───────────────────────────────────────────
+// 由 mode 字段在任务创建时锁定，状态机 guard 拒绝不匹配分支
+
+/** 任务模式：read（采集）或 write（填报） */
+export const TaskMode = z.enum(['read', 'write']);
+export type TaskMode = z.infer<typeof TaskMode>;
+
+// ─── 任务主状态 ─────────────────────────────────────────
+// 基于设计文档 §5 状态机定义
+
+export const TaskState = z.enum([
+  // 通用流程
+  'DRAFT',
+  'PLANNING',
+  'WAITING_DEVICE',
+  'MATCHING',
+  'REUSING',
+  'EXPLORING',
+  'WAITING_HUMAN',
+
+  // 读模式（采集）
+  'COLLECTING',
+  'DATA_VALIDATING',
+  'COMPILING',
+  'REPLAYING',
+  'PUBLISHING',
+
+  // 写模式（填报）
+  'FILLING',
+  'SUBMIT_PENDING',
+  'WAITING_APPROVAL_SUBMIT',
+  'SUBMITTING',
+  'SUBMITTED',
+  'SUBMIT_FAILED',
+  'SUBMIT_UNKNOWN',
+
+  // 终态
+  'SUCCEEDED',
+  'FAILED',
+  'CANCELLED',
+  'PAUSED',
+]);
+export type TaskState = z.infer<typeof TaskState>;
+
+// ─── 任务定义 ───────────────────────────────────────────
+// 基于设计文档 §9.1（结构化任务定义）
+
+export const FieldDefinition = z.object({
+  name: z.string(),
+  label: z.string(),
+  type: z.enum(['string', 'number', 'decimal', 'date', 'boolean', 'enum']),
+  required: z.boolean(),
+  enumValues: z.array(z.string()).optional(),
+});
+export type FieldDefinition = z.infer<typeof FieldDefinition>;
+
+export const TaskDefinition = z.object({
+  taskType: z.literal('collect').or(z.literal('fill')),
+  mode: TaskMode,
+  site: z.object({
+    entryUrl: z.string().url(),
+    allowedDomains: z.array(z.string()),
+    moduleHint: z.string().optional(),
+  }),
+  target: z.object({
+    entity: z.string(),
+    fields: z.array(FieldDefinition),
+  }),
+  scope: z.object({
+    dateRange: z.object({
+      mode: z.enum(['relative', 'absolute']),
+      value: z.string(),
+    }).optional(),
+    maxRecords: z.number().int().positive().optional(),
+  }).optional(),
+  pagination: z.object({
+    mode: z.enum(['auto', 'manual']),
+    maxPages: z.number().int().positive().optional(),
+  }).optional(),
+  output: z.object({
+    format: z.enum(['jsonl', 'csv', 'xlsx']),
+    destination: z.enum(['local', 'server']),
+  }),
+});
+export type TaskDefinition = z.infer<typeof TaskDefinition>;
+
+// ─── 任务摘要（服务端与客户端共享） ────────────────────
+
+export interface TaskSummary {
+  id: string;
+  tenantId: string;
+  userId: string;
+  deviceId: string;
+  state: TaskState;
+  mode: TaskMode;
+  definition: TaskDefinition;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
