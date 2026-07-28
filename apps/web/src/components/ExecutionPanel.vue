@@ -17,7 +17,7 @@
 export interface ExecutionStep {
   action: string;
   locator?: string;
-  status: 'SUCCESS' | 'RUNNING' | 'WAITING';
+  status: 'RUNNING' | 'SUCCESS' | 'WAITING' | 'FAILED';
 }
 
 defineProps<{

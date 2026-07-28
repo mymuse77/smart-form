@@ -7,7 +7,12 @@
       @resume="onResume"
     />
     <div class="main-body">
-      <ChatPanel ref="chatPanelRef" @send-task="onSendTask" />
+      <ChatPanel
+        ref="chatPanelRef"
+        :is-task-running="isTaskRunning"
+        @send-task="onSendTask"
+        @stop-task="onStopTask"
+      />
       <WorkspacePanel :current-url="currentUrl" :frame-src="frameSrc" />
       <ExecutionPanel :steps="steps" />
     </div>
@@ -33,12 +38,13 @@ const frameSrc = ref('');
 const collectedCount = ref(4);
 const errorCount = ref(0);
 const runtimeStr = ref('00:02:15');
+const isTaskRunning = ref(false);
 const chatPanelRef = ref<any>(null);
 
+// 初始化首屏提示步骤
 const steps = ref<ExecutionStep[]>([
   { action: '连接本地 Chromium 独立 Profile 成功', status: 'SUCCESS' },
-  { action: '导航至测试靶场页 http://localhost:8080/table.html', locator: 'page.goto(...)', status: 'SUCCESS' },
-  { action: '提取表格行项目：PRJ-2026-001 ~ PRJ-2026-004 (4条)', locator: 'getByRole("row")', status: 'SUCCESS' },
+  { action: '准备就绪，等待下发自然语言采集指令...', status: 'SUCCESS' },
 ]);
 
 let socket: WebSocket | null = null;
@@ -86,6 +92,8 @@ function connectWebSocket() {
           const msg = JSON.parse(event.data);
           if (msg.type === 'url_changed' && msg.url) {
             currentUrl.value = msg.url;
+          } else if (msg.type === 'human_intervention_required') {
+            handleHumanInterventionRequired(msg);
           } else if (msg.type === 'task_result') {
             handleTaskResult(msg);
           }
@@ -103,9 +111,23 @@ function connectWebSocket() {
   }
 }
 
+function handleHumanInterventionRequired(msg: any) {
+  agentState.value = 'WAITING_HUMAN';
+  const warningText = `⚠️ <strong>检测到目标站点触发了反爬/滑块验证码保护！</strong><br/>已自动为您将本地 Chromium 窗口弹出至最前台。<br/>请在弹出的原生浏览器中完成滑块验证/登录，完成后点击顶栏右侧的 <span style="background:#34a853;color:#fff;padding:2px 6px;border-radius:4px;">恢复 Agent</span> 按钮以继续自动化采集。`;
+  if (chatPanelRef.value?.addAssistantReply) {
+    chatPanelRef.value.addAssistantReply(warningText);
+  }
+  steps.value.push({
+    action: `[反爬拦截] 检测到滑动验证码/登录保护，已弹出现场原生窗口，进入 WAITING_HUMAN 状态`,
+    locator: `WAITING_HUMAN`,
+    status: 'WAITING',
+  });
+}
+
 function handleTaskResult(msg: any) {
   const items = msg.items || [];
   collectedCount.value = items.length;
+  isTaskRunning.value = false; // 恢复任务运行标记
 
   let replyHtml = `<strong>🎉 采集完成！成功提取到 ${items.length} 条数据：</strong><ol style="margin-top:6px;padding-left:18px;">`;
   items.forEach((item: any) => {
@@ -118,7 +140,7 @@ function handleTaskResult(msg: any) {
   }
 
   steps.value.push({
-    action: `成功完成采集！提取出 ${items.length} 条项目数据并已回传 Chat 聊天框`,
+    action: `成功完成当次采集！提取出 ${items.length} 条项目数据并已回传 Chat 聊天框`,
     locator: `page.query_selector_all(...)`,
     status: 'SUCCESS',
   });
@@ -155,13 +177,25 @@ function onResume() {
 }
 
 function onSendTask(taskText: string) {
+  // 1. 强隔离：清空重置右侧步骤明细，只保留当次会话过程
+  steps.value = [];
+
   const matchUrl = taskText.match(/https?:\/\/[^\s]+/);
   if (matchUrl) {
     currentUrl.value = matchUrl[0];
   }
 
+  // 2. 标记当前任务在运行中 (显示停止图标，禁用重复发送)
+  isTaskRunning.value = true;
+
   steps.value.push({
-    action: `下发新自然语言指令: "${taskText}"`,
+    action: `[新会话] 接收自然语言采集指令: "${taskText}"`,
+    status: 'RUNNING',
+  });
+
+  steps.value.push({
+    action: `正在驱动可见 Chromium 导航至: ${currentUrl.value}`,
+    locator: `page.goto("${currentUrl.value}")`,
     status: 'RUNNING',
   });
 
@@ -172,6 +206,20 @@ function onSendTask(taskText: string) {
       url: currentUrl.value,
       timestamp: Date.now()
     }));
+  }
+}
+
+function onStopTask() {
+  isTaskRunning.value = false;
+  steps.value.push({
+    action: `[用户操作] 已手动中断/停止当前采集任务`,
+    status: 'FAILED',
+  });
+  if (chatPanelRef.value?.addAssistantReply) {
+    chatPanelRef.value.addAssistantReply('⏹ 用户已手动停止当次采集任务。');
+  }
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: 'control', action: 'stop' }));
   }
 }
 </script>
