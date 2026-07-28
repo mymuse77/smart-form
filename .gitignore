@@ -1,61 +1,33 @@
 # Dependencies
-node_modules/
-.pnpm-store/
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-.Python
+node_modules
+.venv
+__pycache__
+*.pyc
 
-# Build / dist
-dist/
-build/
-out/
-*.egg-info/
-.turbo/
-.next/
-coverage/
+# Builds
+dist
+build
+*.exe
+*.app
 *.tsbuildinfo
 
-# Electron / Playwright
-playwright-report/
-test-results/
-blob-report/
-.playwright/
-
-# Local runtime data
-profiles/
-artifacts/
-*.sqlite
-*.sqlite-journal
+# Databases & local files
 *.db
-
-# Env and secrets
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-
-# IDE / OS
-.idea/
-.vscode/
-*.swp
-.DS_Store
-Thumbs.db
-Desktop.ini
-
-# Logs
-logs/
+*.sqlite
+dev.db
 *.log
-npm-debug.log*
-pnpm-debug.log*
-yarn-error.log*
 
-# Package manager
-.npm/
-.yarn/
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+# Environment variables
+.env
+!.env.example
+!.env.sqlite.example
+!.env.postgre.example
+
+# IDE & OS
+.DS_Store
+.vscode
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
