@@ -1,0 +1,17 @@
+{
+  "name": "@smart-form/policy-engine",
+  "version": "0.1.0",
+  "description": "Smart Form Domain Policy Engine & Access Control",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@smart-form/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

@@ -4,7 +4,7 @@
   "description": "Smart Form Controlled Test Sites (Mock Target Sites)",
   "private": true,
   "scripts": {
-    "dev": "serve . -p 8080 --single",
+    "dev": "serve . -p 8080",
     "start": "serve . -p 8080"
   },
   "devDependencies": {
