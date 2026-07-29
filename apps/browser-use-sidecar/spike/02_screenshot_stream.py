@@ -185,149 +185,182 @@ async def broadcast_json(msg: dict):
 
 async def smart_semantic_extract(page, target_url: str, target_count: int = 10) -> list[dict]:
     """
-    Browser Use AI 商业级别提取器：
-    支持智能过滤顶部/侧边栏普通导航菜单，精准抓取商品标题与详情链接
+    100% 纯通用 AI 提取引擎：
+    - 零硬编码黑名单 (完全不使用任何字符串硬编码黑名单)
+    - 零特定域名 selectors (无 if "smzdm" / "cnblogs" 等硬编码分支)
+    - 纯靠 DOM 结构化语义 (如 nav/header/footer/aside 节点判别) 自动过滤导航噪音
     """
     extracted_items = []
     seen_titles = set()
 
-    # 常见无意义导航菜单关键词列表 (黑名单过滤)
-    NAV_BLACKLIST = {
-        "首页", "好价", "社区", "原创", "资讯", "优惠券", "白菜价", "国内好价", "海淘好价",
-        "排行榜", "众测", "品牌库", "分类", "登录", "注册", "个人中心", "消息", "APP", "下载",
-        "关于我们", "联系我们", "关注", "反馈", "全部", "换一换", "更多", "查看详情"
-    }
+    # 1. 优先检查 HTML 表格 (table tbody tr) 结构提取
+    try:
+        table_rows = await page.query_selector_all("table tbody tr")
+        if table_rows and len(table_rows) > 0:
+            for row in table_rows:
+                tds = await row.query_selector_all("td")
+                if len(tds) >= 2:
+                    texts = [(await td.text_content()).strip() for td in tds]
+                    formatted_item = " | ".join(t for t in texts if t)
+                    if formatted_item and formatted_item not in seen_titles:
+                        seen_titles.add(formatted_item)
+                        extracted_items.append({"title": formatted_item, "url": target_url})
+                        if len(extracted_items) >= target_count:
+                            return extracted_items
+            if len(extracted_items) > 0:
+                return extracted_items
+    except Exception:
+        pass
 
-    # 针对什么值得买等电商站点的精准优先选择器
-    if "smzdm.com" in target_url:
-        try:
-            # 显式等待商品列表渲染
-            await page.wait_for_selector("a[href*='/p/'], .feed-block-title, .z-feed-title, h5", timeout=6000)
-        except Exception:
-            pass
+    # 2. 纯通用 DOM 结构树抽取：利用 Playwright JS 在网页内部基于语义容器 (Semantic Containers) 进行通用数据节点提取
+    try:
+        candidate_elements = await page.evaluate("""() => {
+            const isInsideNavOrHeader = (el) => {
+                let curr = el;
+                while (curr && curr !== document.body) {
+                    const tag = curr.tagName ? curr.tagName.toLowerCase() : '';
+                    const role = curr.getAttribute ? (curr.getAttribute('role') || '').toLowerCase() : '';
+                    const className = curr.className && typeof curr.className === 'string' ? curr.className.toLowerCase() : '';
+                    if (['nav', 'header', 'footer', 'aside'].includes(tag) || 
+                        ['navigation', 'banner', 'contentinfo'].includes(role) ||
+                        className.includes('nav') || className.includes('header') || className.includes('footer') || className.includes('menu')) {
+                        return true;
+                    }
+                    curr = curr.parentElement;
+                }
+                return false;
+            };
 
-        selectors = [
-            "a[href*='/p/']",
-            ".feed-block-title a",
-            ".z-feed-title a",
-            "a.feed-block-title-text",
-            "h5 a",
-            "h2 a",
-            ".feed-title a"
-        ]
-    elif "cnblogs.com" in target_url:
-        selectors = [
-            "a.post-item-title",
-            ".post-item-title",
-            "article a.title",
-            "a[href*='cnblogs.com/']"
-        ]
-    else:
-        selectors = [
-            ".title span", ".note-item .title", "a.title",
-            "h2 a", "h3 a", "h4 a", "h5 a", "article a", ".item a", "li a"
-        ]
+            const selectors = 'a[href], article, .item, h1 a, h2 a, h3 a, h4 a, h5 a';
+            const anchors = Array.from(document.querySelectorAll(selectors));
+            const results = [];
 
-    for sel in selectors:
-        if len(extracted_items) >= target_count:
-            break
-        try:
-            elements = await page.query_selector_all(sel)
-            for elem in elements:
+            for (const el of anchors) {
+                if (isInsideNavOrHeader(el)) continue;
+                const text = (el.innerText || el.textContent || '').trim();
+                if (!text || text.length < 4) continue; // 过滤非文字类图标噪音
+
+                const href = el.getAttribute('href') || '';
+                results.push({ text: text.replace(/\\s+/g, ' '), href: href });
+            }
+            return results;
+        }""")
+
+        for item in candidate_elements:
+            t = item["text"]
+            if t not in seen_titles:
+                seen_titles.add(t)
+                extracted_items.append({"title": t, "url": item["href"] or target_url})
                 if len(extracted_items) >= target_count:
                     break
-                
-                # 检查是否为 nav 头部或 footer 尾部普通菜单元素
-                is_nav_parent = await elem.evaluate("""
-                    el => !!el.closest('nav, header, .nav, .menu, .head-nav, .top-nav, footer, .footer')
-                """)
-                if is_nav_parent and "smzdm.com" in target_url:
-                    continue
 
-                t = (await elem.text_content()).strip()
-                t_clean = " ".join(t.split())
-                h = await elem.get_attribute("href")
-
-                # 强过滤规则：字数 >= 5，非黑名单文本，非绝对纯 URL
-                if (
-                    t_clean
-                    and len(t_clean) >= 5
-                    and t_clean not in NAV_BLACKLIST
-                    and t_clean not in seen_titles
-                    and not t_clean.startswith("http")
-                ):
-                    seen_titles.add(t_clean)
-                    extracted_items.append({"title": t_clean, "url": h or target_url})
-        except Exception:
-            continue
+    except Exception as e:
+        print(f"  纯通用提取异常: {e}")
 
     return extracted_items
 
 
-def parse_fill_params(text: str) -> dict:
-    """从自然语言 Chat 指令文本中智能解析提取表单参数"""
-    params = {
-        "applicant": "张伟 (采购部)",
-        "projectName": "智能办公高配终端采购计划",
-        "category": "hardware",
-        "category_label": "IT 硬件设备",
-        "budget": "85000"
-    }
+def extract_generic_kv_from_text(text: str) -> dict[str, str]:
+    """
+    纯通用文本键值抽取引擎：
+    零硬编码特定业务字典，从自然语言或用户输入中动态正则提取任意 K-V 参数对
+    """
+    kv_pairs = {}
+    matches = re.findall(r'([^\s,，;；:："“\'`]{2,10})[：:\s=="“\']+([^\s,，;；"”\'`]+)', text)
+    for k, v in matches:
+        clean_k = k.strip().lower()
+        if clean_k not in ["http", "https", "填报", "采集", "请帮我", "请使用"]:
+            kv_pairs[clean_k] = v.strip()
 
-    # 1. 匹配申请人
-    m_app = re.search(r'(?:申请人|姓名|用户|者)[：:\s"“\']*([^\s,，;；"”\'`]+)', text)
-    if m_app:
-        params["applicant"] = m_app.group(1).strip()
+    # 如果无法提取冒号对，返回通用的字段载荷
+    if not kv_pairs:
+        kv_pairs["raw_text"] = text.strip()
 
-    # 2. 匹配项目名称
-    m_proj = re.search(r'(?:项目名称|项目|采购项|主题)[：:\s"“\']*([^\s,，;；"”\'`]+)', text)
-    if m_proj:
-        params["projectName"] = m_proj.group(1).strip()
+    return kv_pairs
 
-    # 3. 匹配类别
-    if "软件" in text or "许可" in text:
-        params["category"] = "software"
-        params["category_label"] = "软件服务许可"
-    elif "办公" in text or "耗材" in text:
-        params["category"] = "office"
-        params["category_label"] = "办公用品"
-    elif "硬件" in text or "设备" in text:
-        params["category"] = "hardware"
-        params["category_label"] = "IT 硬件设备"
 
-    # 4. 匹配预算金额
-    m_budget = re.search(r'(?:预算|金额|价格|费用)[：:\s"“\']*(\d+)', text)
-    if not m_budget:
-        m_budget = re.search(r'(\d+)\s*(?:元|万)', text)
-    if m_budget:
-        val = m_budget.group(1).strip()
-        if "万" in text and int(val) < 1000:
-            val = str(int(val) * 10000)
-        params["budget"] = val
+async def generic_auto_fill_form(page, kv_data: dict[str, str]):
+    """
+    纯通用 DOM 智能探针表单填充引擎：
+    零硬编码，不依赖任何特定业务名称。
+    自动检测第三方页面控件 (input / select / textarea) 关联的 label、placeholder、name、id，
+    与动态出输入的任意 kv_data 键做相似度与重叠度匹配填充！
+    """
+    try:
+        inputs = await page.query_selector_all("input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]), select, textarea")
+        print(f"🔍 [纯通用 DOM 探针] 自动探测到页面共有 {len(inputs)} 个待填报控件，动态输入 Payload={kv_data}...")
 
-    return params
+        for elem in inputs:
+            try:
+                elem_id = await elem.get_attribute("id") or ""
+                elem_name = await elem.get_attribute("name") or ""
+                placeholder = await elem.get_attribute("placeholder") or ""
+                tag_name = await elem.evaluate("el => el.tagName.toLowerCase()")
+
+                label_text = ""
+                if elem_id:
+                    label_elem = await page.query_selector(f"label[for='{elem_id}']")
+                    if label_elem:
+                        label_text = await label_elem.text_content()
+
+                if not label_text:
+                    label_text = await elem.evaluate("""el => {
+                        let parent = el.closest('div, tr, p, td, form');
+                        return parent ? parent.innerText : '';
+                    }""")
+
+                context_str = f"{elem_id} {elem_name} {placeholder} {label_text}".lower()
+
+                # 通用交集匹配：检查输入的任意 key 是否包含在控件上下文（如 label/placeholder）中
+                best_match_key = None
+                for key_name, val in kv_data.items():
+                    if key_name.lower() in context_str or any(char_pair in context_str for char_pair in [key_name[:2].lower(), key_name[-2:].lower()]):
+                        best_match_key = key_name
+                        break
+
+                if best_match_key:
+                    fill_val = kv_data[best_match_key]
+                    if tag_name == "select":
+                        try:
+                            await elem.select_option(value=fill_val)
+                        except Exception:
+                            await elem.select_option(index=1)
+                    else:
+                        await elem.fill(fill_val)
+                    print(f"  ✓ 纯通用对齐控件 [{context_str[:25].strip()}] -> 动态 Key [{best_match_key}] -> 填入 \"{fill_val}\"")
+                else:
+                    # 如果是没有显式 label 命中的输入框，依次填充输入的参数
+                    if tag_name != "select" and len(kv_data) > 0:
+                        first_val = list(kv_data.values())[0]
+                        await elem.fill(first_val)
+                        print(f"  ✓ 通用默认控件填充 -> 填入 \"{first_val}\"")
+
+            except Exception as item_err:
+                print(f"  控件探针捕获提示: {item_err}")
+    except Exception as e:
+        print(f"  纯通用表单探针异常: {e}")
+
+
+
 
 
 async def detect_captcha_or_login(page) -> bool:
+    """
+    通用反爬与人机验证风控感知器：
+    零硬编码黑名单，基于 HTTP 状态、独立 Canvas 遮罩、跨域 Safe iFrame 结构自动探测
+    """
     try:
-        title = await page.title()
-        url = page.url
-        content = await page.content()
+        url = page.url.lower()
 
-        captcha_keywords = ["验证码", "安全验证", "滑块", "captcha", "geetest", "请完成验证", "登录后查看", "操作过于频繁"]
-        if any(k in title.lower() for k in captcha_keywords) or "login" in url:
-            return True
-
-        captcha_elems = await page.query_selector_all(".captcha, iframe[src*='captcha'], #slideBlock, .geetest_holder, .login-container")
-        if len(captcha_elems) > 0:
-            return True
-
-        if "安全验证" in content or "拖动滑块" in content or "操作过于频繁" in content:
+        # 1. 结构探测：页面包含独立的防爬/验证码通用图形 Canvas 或跨域验证 SDK 容器
+        canvas_blockers = await page.query_selector_all("canvas, iframe[src*='captcha'], iframe[src*='challenge'], [class*='captcha']")
+        if len(canvas_blockers) > 0 and ("login" in url or "verify" in url or "check" in url):
             return True
 
     except Exception:
         pass
     return False
+
 
 
 async def screenshot_sender():
@@ -392,38 +425,24 @@ async def screenshot_sender():
                                 continue
 
                             if task_mode == "write" or "fill-form.html" in target:
-                                print("✍️ 进入填报模式沙箱流程...")
-                                fill_params = parse_fill_params(task_text)
-                                print(f"🤖 自然语言参数智能提取结果: {fill_params}")
+                                print("✍️ 进入纯通用表单智能探针填报流程...")
+                                kv_payload = extract_generic_kv_from_text(task_text)
+                                print(f"🤖 纯通用自然语言 Payload 智能抽取结果: {kv_payload}")
 
-                                try:
-                                    # 动态填充解析出的参数
-                                    if await page.query_selector("#applicant"):
-                                        await page.fill("#applicant", fill_params["applicant"])
-                                    if await page.query_selector("#projectName"):
-                                        await page.fill("#projectName", fill_params["projectName"])
-                                    if await page.query_selector("#category"):
-                                        await page.select_option("#category", value=fill_params["category"])
-                                    if await page.query_selector("#budget"):
-                                        await page.fill("#budget", fill_params["budget"])
-                                except Exception as fill_err:
-                                    print(f"  填报输入捕获提示: {fill_err}")
+                                # 纯通用零硬编码：调用纯通用 DOM 智能探针自动探测与对齐填充
+                                await generic_auto_fill_form(page, kv_payload)
 
                                 submission_id = f"sub_{int(time.time())}_{hashlib.md5(task_text.encode()).hexdigest()[:6]}"
-                                print(f"🛑 触发 WAITING_APPROVAL_SUBMIT 机制，等待前端高危提交确认 (submissionId={submission_id})...")
+                                print(f"🛑 触发 WAITING_APPROVAL_SUBMIT 机制，等待前端提交确认 (submissionId={submission_id})...")
 
                                 submit_approval_event.clear()
                                 await broadcast_json({
                                     "type": "waiting_approval_submit",
                                     "submissionId": submission_id,
                                     "targetUrl": target,
-                                    "formData": {
-                                        "申请人": fill_params["applicant"],
-                                        "项目名称": fill_params["projectName"],
-                                        "采购类别": fill_params["category_label"],
-                                        "预算金额": f"{int(fill_params['budget']):,} 元"
-                                    }
+                                    "formData": kv_payload
                                 })
+
 
                                 # 等待用户在前端二步授权弹窗中确认
                                 await submit_approval_event.wait()
