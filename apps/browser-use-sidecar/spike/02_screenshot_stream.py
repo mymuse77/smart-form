@@ -15,9 +15,7 @@ import sys
 import time
 import os
 from pathlib import Path
-import websockets
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
 
 # 加载根目录 .env
 env_path = Path(__file__).resolve().parents[3] / ".env"
@@ -25,7 +23,6 @@ load_dotenv(dotenv_path=env_path)
 
 # 读取无头模式配置 (默认 false: 可见原生窗口)
 IS_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
-
 
 if sys.platform == "win32":
     import io
@@ -451,17 +448,10 @@ async def screenshot_sender():
 
 
 async def main():
-    print(f"▶ 启动 WebSocket 服务端 ws://127.0.0.1:{WS_PORT} ...")
-    try:
-        server = await websockets.serve(handler, "127.0.0.1", WS_PORT)
-    except OSError as err:
-        if err.errno == 10048:
-            print(f"⚠️ 端口 {WS_PORT} 已被先前运行的进程占用，请先关闭正在运行的 Python 进程或在任务管理器中结束它。")
-            return
-        raise err
+    print(f"▶ 启动 WebSocket 服务端 ws://localhost:{WS_PORT} ...")
+    server = await websockets.serve(handler, "localhost", WS_PORT)
     print("✅ 智能商业提取与菜单过滤引擎已运行！")
     await asyncio.gather(server.wait_closed(), screenshot_sender())
 
 if __name__ == "__main__":
     asyncio.run(main())
-
