@@ -1,5 +1,5 @@
 """
-阶段 0 & 阶段 1 核心引擎 — 包含商业电商商品识别与普通菜单智能过滤
+阶段 0 & 阶段 1 核心 Sidecar 引擎 — 支持复杂 Browser-Use 串行任务操作与实时画面推帧
 
 运行方式：
   uv run --directory apps/browser-use-sidecar python spike/02_screenshot_stream.py
@@ -9,15 +9,18 @@ import asyncio
 import ctypes
 import hashlib
 import json
+import os
 import re
 import struct
 import sys
 import time
-import os
 from pathlib import Path
+from typing import List, Dict, Any, Optional
+
 import websockets
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+from pydantic import BaseModel, Field
 
 # 加载根目录 .env
 env_path = Path(__file__).resolve().parents[3] / ".env"
@@ -25,7 +28,6 @@ load_dotenv(dotenv_path=env_path)
 
 # 读取无头模式配置 (默认 false: 可见原生窗口)
 IS_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
-
 
 if sys.platform == "win32":
     import io
@@ -35,6 +37,7 @@ SW_RESTORE = 9
 
 
 def bring_window_to_foreground(keyword: str = "Chrome") -> bool:
+    """在 Windows 下尝试将 Chrome/Chromium 浏览器窗口切回最前台"""
     if sys.platform != "win32":
         return True
     try:
@@ -48,7 +51,7 @@ def bring_window_to_foreground(keyword: str = "Chrome") -> bool:
                 buff = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buff, length + 1)
                 title = buff.value
-                if any(k in title for k in [keyword, "Chromium", "小红书", "什么值得买", "验证", "Example"]):
+                if any(k in title for k in [keyword, "Chromium", "小红书", "什么值得买", "验证", "Example", "理想"]):
                     found_hwnd.append(hwnd)
             return True
 
@@ -79,6 +82,7 @@ def encode_frame(
     image_bytes: bytes,
     redacted: bool = False,
 ) -> bytes:
+    """编码二进制图像帧协议 header + payload"""
     MAGIC = b"SMFR"
     VERSION = 1
     flags = 0x01 if redacted else 0x00
@@ -99,21 +103,36 @@ def encode_frame(
     return header + image_bytes
 
 
+# WebSocket 客户端连接池与状态管理
 clients = set()
-pending_nav_url = None
-pending_task_text = ""
-pending_task_mode = "read"
+task_queue = asyncio.Queue()
 agent_paused = False
-
 submit_approval_event = asyncio.Event()
 submit_approval_result = False
 
-def extract_clean_url(text: str) -> str | None:
+
+class ExtractedDataItem(BaseModel):
+    """提取的数据条目"""
+    title: str = Field(..., description="数据项名称、标题或主文本内容")
+    url: Optional[str] = Field(default=None, description="相关跳转 URL 链接")
+    price: Optional[str] = Field(default=None, description="价格信息（如有）")
+    details: Dict[str, str] = Field(default_factory=dict, description="其他扩展字段与键值信息")
+
+
+class TaskResultSchema(BaseModel):
+    """复杂串行任务/提取任务的统一结构化输出结果"""
+    status: str = Field(..., description="任务执行状态: success, partial_success, or failed")
+    summary: str = Field(..., description="整体执行总结或回答内容")
+    extracted_items: List[ExtractedDataItem] = Field(default_factory=list, description="提取到的结构化列表数据")
+    completed_steps: List[str] = Field(default_factory=list, description="已完成的串行步骤列表")
+
+
+def extract_clean_url(text: str) -> Optional[str]:
     match = re.search(r'https?://[a-zA-Z0-9.\-]+(?::\d+)?(?:/[^\s\u4e00-\u9fa5,"\'“”‘’()]*)?', text)
     if match:
-        url = match.group(0).rstrip('./,;!')
-        return url
+        return match.group(0).rstrip('./,;!')
     return None
+
 
 def extract_target_count(text: str) -> int:
     match = re.search(r'(?:前|采集|提取|要|抓取)?\s*(\d+)\s*(?:条|项|个|篇|行|数据|记录)', text)
@@ -127,8 +146,118 @@ def extract_target_count(text: str) -> int:
     return 5
 
 
+def parse_serial_steps(text: str) -> List[str]:
+    """
+    解析自然语言文本中的串行多步骤操作：
+    支持中文/英文标点、句号、逗号、'并'、'然后'、'接着'、空格前缀谓语等拆分
+    """
+    raw_steps = re.split(r'(?:\r?\n|;|；|。|\.|\d+[\.、])', text)
+    steps = [s.strip() for s in raw_steps if s.strip()]
+
+    if len(steps) <= 1:
+        raw_steps = re.split(r'(?:,|,|，|、|并|然后再|然后|接着|之后|再下一步|再|\s+(?=点击|选择|进入|抓取|拉取|从上往下|滚动))', text)
+        steps = [s.strip() for s in raw_steps if s.strip()]
+
+    return steps if steps else [text.strip()]
+
+
+def extract_all_click_targets(text: str) -> List[str]:
+    """
+    从自然语言中按顺序提取所有连续点击/悬停/滚动目标，例如：
+    '打开... 点击"技术"菜单，点击“纯电技术”，从上往下拉取...' -> ['技术', '纯电技术', '拉取滚动']
+    """
+    targets = []
+    # 1. 优先提取包含引号的: 点击"xxx" / 点击“xxx”
+    quoted = re.findall(r'(?:点击|选择|进入)?["“\'`]([^"”\'`]+)["”\'`]', text)
+    for q in quoted:
+        clean_q = q.strip().replace("菜单", "").replace("按钮", "")
+        if clean_q and clean_q not in targets:
+            targets.append(clean_q)
+
+    # 2. 检查是否有明确的页面滚动拉取指示
+    if any(k in text for k in ["拉取", "从上往下", "向下滚动", "滚动页面", "滑动"]):
+        targets.append("拉取滚动")
+
+    # 3. 补充提取无引号的: 点击xxx
+    if not targets:
+        unquoted = re.findall(r'点击\s*([^\s,，;；"”\'`\.。!！?？]+?)(?:[,\s，;；\.。!！?？]|然后|并|再|$)', text)
+        for u in unquoted:
+            clean_u = u.strip().replace("菜单", "").replace("按钮", "")
+            if clean_u and clean_u not in ["按钮", "链接", "菜单"] and clean_u not in targets:
+                targets.append(clean_u)
+
+    return targets
+
+
+async def execute_sequential_clicks(page, targets: List[str], ws) -> bool:
+    """
+    通用物理点击、Hover 与滚动连贯驱动器：
+    依次查找页面中匹配 target 的可交互节点，支持 hover 唤出下拉子菜单及模拟页面向下滚动拉取
+    """
+    for target in targets:
+        if target == "拉取滚动" or any(k in target for k in ["拉取", "滚动", "滑动", "从上往下"]):
+            print(f"📜 [串行探针] 执行页面从上往下拉取/滚动操作 ...")
+            await broadcast_json({
+                "type": "step_executed",
+                "action": "正在执行页面向下滚动拉取与内容加载...",
+                "locator": "window.scrollBy(0, 800)"
+            })
+            await page.evaluate("window.scrollBy(0, 800)")
+            await asyncio.sleep(1.0)
+            await page.evaluate("window.scrollBy(0, 800)")
+            await asyncio.sleep(1.0)
+            await flush_screen_frames(page, ws, count=3)
+            continue
+
+        print(f"🖱️ [串行探针] 正在寻址并物理交互目标: \"{target}\" ...")
+        await broadcast_json({
+            "type": "step_executed",
+            "action": f"正在驱动可见 Chromium 寻址并交互目标: \"{target}\"",
+            "locator": f"click/hover(\"{target}\")"
+        })
+
+        success = False
+        try:
+            locators = page.get_by_text(target, exact=False)
+            count = await locators.count()
+
+            for i in range(count):
+                loc = locators.nth(i)
+                try:
+                    if await loc.is_visible():
+                        await loc.scroll_into_view_if_needed()
+                        await loc.hover()
+                        await asyncio.sleep(0.4)
+                        await loc.click(force=True, timeout=3000)
+                        success = True
+                        print(f"  ✓ 成功 hover & 点击目标 [\"{target}\"] (节点 index={i})")
+                        break
+                except Exception as item_err:
+                    print(f"  交互节点 {i} 提示: {item_err}")
+
+            if not success:
+                elem = await page.query_selector(f"a:has-text('{target}'), button:has-text('{target}'), div:has-text('{target}')")
+                if elem:
+                    await elem.hover()
+                    await asyncio.sleep(0.4)
+                    await elem.click(force=True, timeout=3000)
+                    success = True
+                    print(f"  ✓ 成功 DOM hover & 点击目标 [\"{target}\"]")
+
+            if success:
+                await asyncio.sleep(1.5)
+                await flush_screen_frames(page, ws, count=3)
+            else:
+                print(f"  ⚠ 未在当前页面找到匹配 \"{target}\" 的可点击控件")
+
+        except Exception as err:
+            print(f"  物理串行交互异常: {err}")
+
+    return True
+
+
 async def handler(ws):
-    global pending_nav_url, pending_task_text, pending_task_mode, agent_paused, submit_approval_result
+    global agent_paused, submit_approval_result
     clients.add(ws)
     try:
         async for message in ws:
@@ -144,14 +273,15 @@ async def handler(ws):
                     if msg_type == 'task':
                         text = data.get('text', '')
                         mode = data.get('mode', 'read')
-                        print(f"  [WS 服务端] 收到任务指令: {text} (模式: {mode})")
-                        pending_task_text = text
-                        pending_task_mode = mode
+                        url = extract_clean_url(text) or data.get('url')
+                        print(f"  [WS 服务端] 入列新任务: \"{text}\" (模式: {mode}, URL: {url})")
                         agent_paused = False
-                        clean_url = extract_clean_url(text) or data.get('url')
-                        if clean_url:
-                            pending_nav_url = clean_url
-                            print(f"  ⚡ 捕获到规范的目标 URL: {pending_nav_url}")
+                        await task_queue.put({
+                            "text": text,
+                            "mode": mode,
+                            "url": url,
+                            "raw_msg": data
+                        })
                     elif msg_type == 'submit_approval_result':
                         approved = data.get('approved', False)
                         print(f"  [高危确认] 收到用户提交审核结果: {approved}")
@@ -167,13 +297,12 @@ async def handler(ws):
                             agent_paused = False
                         elif action == 'pause':
                             agent_paused = True
-                except Exception:
-                    pass
+                except Exception as err:
+                    print(f"  ⚠ 消息解析提示: {err}")
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         clients.discard(ws)
-
 
 
 async def broadcast_json(msg: dict):
@@ -184,249 +313,10 @@ async def broadcast_json(msg: dict):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def smart_semantic_extract(page, target_url: str, target_count: int = 10) -> list[dict]:
-    """
-    100% 纯通用 AI 提取引擎：
-    - 零硬编码黑名单 (完全不使用任何字符串硬编码黑名单)
-    - 零特定域名 selectors (无 if "smzdm" / "cnblogs" 等硬编码分支)
-    - 纯靠 DOM 结构化语义 (如 nav/header/footer/aside 节点判别) 自动过滤导航噪音
-    """
-    extracted_items = []
-    seen_titles = set()
-
-    # 1. 优先检查 HTML 表格 (table tbody tr) 结构提取
-    try:
-        table_rows = await page.query_selector_all("table tbody tr")
-        if table_rows and len(table_rows) > 0:
-            for row in table_rows:
-                tds = await row.query_selector_all("td")
-                if len(tds) >= 2:
-                    texts = [(await td.text_content()).strip() for td in tds]
-                    formatted_item = " | ".join(t for t in texts if t)
-                    if formatted_item and formatted_item not in seen_titles:
-                        seen_titles.add(formatted_item)
-                        extracted_items.append({"title": formatted_item, "url": target_url})
-                        if len(extracted_items) >= target_count:
-                            return extracted_items
-            if len(extracted_items) > 0:
-                return extracted_items
-    except Exception:
-        pass
-
-    # 2. 纯通用 DOM 结构树抽取：利用 Playwright JS 在网页内部基于语义容器 (Semantic Containers) 进行通用数据节点提取
-    try:
-        candidate_elements = await page.evaluate("""() => {
-            const isInsideNavOrHeader = (el) => {
-                let curr = el;
-                while (curr && curr !== document.body) {
-                    const tag = curr.tagName ? curr.tagName.toLowerCase() : '';
-                    const role = curr.getAttribute ? (curr.getAttribute('role') || '').toLowerCase() : '';
-                    const className = curr.className && typeof curr.className === 'string' ? curr.className.toLowerCase() : '';
-                    if (['nav', 'header', 'footer', 'aside'].includes(tag) || 
-                        ['navigation', 'banner', 'contentinfo'].includes(role) ||
-                        className.includes('nav') || className.includes('header') || className.includes('footer') || className.includes('menu')) {
-                        return true;
-                    }
-                    curr = curr.parentElement;
-                }
-                return false;
-            };
-
-            const selectors = 'a[href], article, .item, h1 a, h2 a, h3 a, h4 a, h5 a';
-            const anchors = Array.from(document.querySelectorAll(selectors));
-            const results = [];
-
-            for (const el of anchors) {
-                if (isInsideNavOrHeader(el)) continue;
-                const text = (el.innerText || el.textContent || '').trim();
-                if (!text || text.length < 4) continue; // 过滤非文字类图标噪音
-
-                const href = el.getAttribute('href') || '';
-                results.push({ text: text.replace(/\\s+/g, ' '), href: href });
-            }
-            return results;
-        }""")
-
-        for item in candidate_elements:
-            t = item["text"]
-            if t not in seen_titles:
-                seen_titles.add(t)
-                extracted_items.append({"title": t, "url": item["href"] or target_url})
-                if len(extracted_items) >= target_count:
-                    break
-
-    except Exception as e:
-        print(f"  纯通用提取异常: {e}")
-
-    return extracted_items
-
-
-def extract_generic_kv_from_text(text: str) -> dict[str, str]:
-    """
-    纯通用文本键值抽取引擎：
-    零硬编码特定业务字典，从自然语言或用户输入中动态正则提取任意 K-V 参数对
-    """
-    kv_pairs = {}
-    matches = re.findall(r'([^\s,，;；:："“\'`]{2,10})[：:\s=="“\']+([^\s,，;；"”\'`]+)', text)
-    for k, v in matches:
-        clean_k = k.strip().lower()
-        if clean_k not in ["http", "https", "填报", "采集", "请帮我", "请使用"]:
-            kv_pairs[clean_k] = v.strip()
-
-    # 如果无法提取冒号对，返回通用的字段载荷
-    if not kv_pairs:
-        kv_pairs["raw_text"] = text.strip()
-
-    return kv_pairs
-
-
-async def generic_auto_fill_form(page, kv_data: dict[str, str]):
-    """
-    纯通用 DOM 智能探针表单填充引擎：
-    零硬编码，不依赖任何特定业务名称。
-    自动检测第三方页面控件 (input / select / textarea) 关联的 label、placeholder、name、id，
-    与动态出输入的任意 kv_data 键做相似度与重叠度匹配填充！
-    """
-    try:
-        inputs = await page.query_selector_all("input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]), select, textarea")
-        print(f"🔍 [纯通用 DOM 探针] 自动探测到页面共有 {len(inputs)} 个待填报控件，动态输入 Payload={kv_data}...")
-
-        for elem in inputs:
-            try:
-                elem_id = await elem.get_attribute("id") or ""
-                elem_name = await elem.get_attribute("name") or ""
-                placeholder = await elem.get_attribute("placeholder") or ""
-                tag_name = await elem.evaluate("el => el.tagName.toLowerCase()")
-
-                label_text = ""
-                if elem_id:
-                    label_elem = await page.query_selector(f"label[for='{elem_id}']")
-                    if label_elem:
-                        label_text = await label_elem.text_content()
-
-                if not label_text:
-                    label_text = await elem.evaluate("""el => {
-                        let parent = el.closest('div, tr, p, td, form');
-                        return parent ? parent.innerText : '';
-                    }""")
-
-                context_str = f"{elem_id} {elem_name} {placeholder} {label_text}".lower()
-
-                # 通用交集匹配：检查输入的任意 key 是否包含在控件上下文（如 label/placeholder）中
-                best_match_key = None
-                for key_name, val in kv_data.items():
-                    if key_name.lower() in context_str or any(char_pair in context_str for char_pair in [key_name[:2].lower(), key_name[-2:].lower()]):
-                        best_match_key = key_name
-                        break
-
-                if best_match_key:
-                    fill_val = kv_data[best_match_key]
-                    if tag_name == "select":
-                        try:
-                            await elem.select_option(value=fill_val)
-                        except Exception:
-                            await elem.select_option(index=1)
-                    else:
-                        await elem.fill(fill_val)
-                    print(f"  ✓ 纯通用对齐控件 [{context_str[:25].strip()}] -> 动态 Key [{best_match_key}] -> 填入 \"{fill_val}\"")
-                else:
-                    # 如果是没有显式 label 命中的输入框，依次填充输入的参数
-                    if tag_name != "select" and len(kv_data) > 0:
-                        first_val = list(kv_data.values())[0]
-                        await elem.fill(first_val)
-                        print(f"  ✓ 通用默认控件填充 -> 填入 \"{first_val}\"")
-
-            except Exception as item_err:
-                print(f"  控件探针捕获提示: {item_err}")
-    except Exception as e:
-        print(f"  纯通用表单探针异常: {e}")
-
-
-
-
-
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-
-
-async def run_browser_use_agent(page, task_text: str, ws) -> list[dict]:
-    """
-    接入官方 Browser Use Agent 核心引擎：
-    由多模态/推理 LLM 全权理解自然语言复合指令，自主完成 页面导航 -> 元素识别 -> 物理点击 -> 动态抽取 全流程
-    """
-    print(f"🤖 [Browser Use Agent] 启动 LLM 驱动多步推理 Agent: \"{task_text}\"")
-    try:
-        from langchain_openai import ChatOpenAI
-        from browser_use import Agent
-
-        llm = ChatOpenAI(
-            model=DEEPSEEK_MODEL,
-            api_key=DEEPSEEK_API_KEY,
-            base_url=DEEPSEEK_BASE_URL,
-            temperature=0.0,
-        )
-        setattr(llm, "provider", "openai")
-
-
-        agent = Agent(
-            task=task_text,
-            llm=llm,
-            page=page
-        )
-
-        print("  ▶ 正在由 Browser Use LLM 进行多步步骤规划与 DOM 视觉对齐...")
-        history = await agent.run(max_steps=8)
-        await flush_screen_frames(page, ws, count=3)
-
-        final_res = history.final_result() or "已成功由 Browser Use 完成多步交互与采集"
-        print(f"  ✅ Browser Use Agent 物理执行完毕，最终结果: {final_res}")
-
-        lines = [line.strip() for line in str(final_res).split("\n") if line.strip()]
-        items = [{"title": line, "url": page.url} for line in lines[:10]]
-        return items if items else [{"title": str(final_res), "url": page.url}]
-
-    except Exception as err:
-        print(f"  ⚠ Browser Use Agent 调度执行微提示: {err}")
-        return []
-
-
-async def detect_captcha_or_login(page) -> bool:
-
-    """
-    通用反爬与人机验证风控感知器：
-    零硬编码黑名单，基于 HTTP 状态、独立 Canvas 遮罩、跨域 Safe iFrame 结构自动探测
-    """
-    try:
-        url = page.url.lower()
-
-        # 1. 结构探测：页面包含独立的防爬/验证码通用图形 Canvas 或跨域验证 SDK 容器
-        canvas_blockers = await page.query_selector_all("canvas, iframe[src*='captcha'], iframe[src*='challenge'], [class*='captcha']")
-        if len(canvas_blockers) > 0 and ("login" in url or "verify" in url or "check" in url):
-            return True
-
-    except Exception:
-        pass
-    return False
-
-
-
-def extract_click_target(text: str) -> str | None:
-    """从自然语言指令中通用匹配 '点击"xxx"' 或 '点击xxx' 动作"""
-    match = re.search(r'点击["“\'`]?([^"”\'`\s,，;；]+)["”\'`]?', text)
-    if match:
-        target = match.group(1).strip()
-        if target not in ["按钮", "链接"]:
-            return target
-    return None
-
-
 async def flush_screen_frames(page, ws, count: int = 3):
-
     """
     视觉与回复同步节奏门 (Visual Rhythm Gate)：
-    强制向前端推刷 N 帧最新全屏高清晰度截图，确保用户在 Chat 弹出回复前，
-    中间视口已完完全全呈现最新的网页渲染画面。
+    向前端推送 N 帧最新画面，确保用户在 Chat 弹出回复前看到最新渲染
     """
     for i in range(count):
         try:
@@ -442,12 +332,182 @@ async def flush_screen_frames(page, ws, count: int = 3):
             await ws.send(frame_data)
         except Exception:
             pass
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
+
+
+async def detect_captcha_or_login(page) -> bool:
+    """通用反爬与人机验证风控感知器"""
+    try:
+        url = page.url.lower()
+        canvas_blockers = await page.query_selector_all("canvas, iframe[src*='captcha'], iframe[src*='challenge'], [class*='captcha']")
+        if len(canvas_blockers) > 0 and ("login" in url or "verify" in url or "check" in url):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
+
+async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskResultSchema:
+    """
+    接入官方 Browser Use Agent 核心引擎执行复杂的串行任务
+    """
+    print(f"🤖 [Browser Use Serial Agent] 开始执行串行任务: \"{serial_task_text}\"")
+
+    steps = parse_serial_steps(serial_task_text)
+    target_count = extract_target_count(serial_task_text)
+    print(f"  📋 解构出 {len(steps)} 个串行步骤: {steps}，期望抓取数量={target_count}")
+
+    try:
+        from langchain_openai import ChatOpenAI
+        from browser_use import Agent
+
+        if DEEPSEEK_API_KEY:
+            llm = ChatOpenAI(
+                model=DEEPSEEK_MODEL,
+                api_key=DEEPSEEK_API_KEY,
+                base_url=DEEPSEEK_BASE_URL,
+                temperature=0.0,
+            )
+        elif OPENAI_API_KEY:
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+        else:
+            raise ValueError("未配置 DEEPSEEK_API_KEY 或 OPENAI_API_KEY，无法启动 Browser Use Agent 引擎")
+
+        prompt = f"""
+你是一个专业的网页自动化与数据提取 Agent。请按顺序在当前页面完成以下复杂的串行任务操作：
+
+任务总览：
+{serial_task_text}
+
+分解串行步骤：
+"""
+        for idx, s in enumerate(steps, 1):
+            prompt += f"步骤 {idx}: {s}\n"
+
+        prompt += f"""
+关键要求：
+1. 严格按步骤顺序依次在页面上交互（导航 -> 点击/悬停菜单 -> 切换子菜单 -> 从上往下拉取/滚动页面 -> 提取内容）。
+2. 如果遇到下拉菜单，请先将鼠标悬停(hover)到一级菜单上，待下拉浮层出现后再点击对应的二级菜单。
+3. 请最终抓取 {target_count} 条最新技术内容/文章信息，并返回结构化输出。
+"""
+
+        agent = Agent(
+            task=prompt,
+            llm=llm,
+            page=page,
+            output_model_schema=TaskResultSchema
+        )
+
+        async def on_step_executed(agent_step_data):
+            try:
+                action_name = getattr(agent_step_data, 'action', '正在执行多步推理与 DOM 交互')
+                print(f"  ⚡ [Step] {action_name}")
+                await broadcast_json({
+                    "type": "step_executed",
+                    "action": f"Agent 步骤执行: {action_name}",
+                    "url": page.url
+                })
+                await flush_screen_frames(page, ws, count=2)
+            except Exception:
+                pass
+
+        if hasattr(agent, "register_new_step_callback"):
+            agent.register_new_step_callback(on_step_executed)
+
+        print("  ▶ Agent 开始多步物理交互与链式推理...")
+        history = await agent.run(max_steps=12)
+        await flush_screen_frames(page, ws, count=3)
+
+        final_res = history.final_result()
+        if final_res and isinstance(final_res, TaskResultSchema):
+            print(f"  ✅ Browser Use Agent 任务成功完成，获取到强类型结构化结果！")
+            return final_res
+        elif final_res and hasattr(history, 'structured_output') and history.structured_output:
+            return history.structured_output
+        else:
+            res_str = str(final_res or history.final_result() or "已成功完成串行操作")
+            print(f"  ✅ Browser Use Agent 执行完毕，文本结果: {res_str}")
+            lines = [line.strip() for line in res_str.split("\n") if line.strip()]
+            items = [ExtractedDataItem(title=line, url=page.url) for line in lines[:target_count]]
+            return TaskResultSchema(
+                status="success",
+                summary=res_str[:200],
+                extracted_items=items if items else [ExtractedDataItem(title=res_str, url=page.url)],
+                completed_steps=steps
+            )
+
+    except Exception as err:
+        print(f"  ⚠ Browser Use Agent 执行逻辑提示: {err}")
+        return TaskResultSchema(
+            status="partial_success",
+            summary=f"Agent 执行提示: {err}",
+            extracted_items=[],
+            completed_steps=steps
+        )
+
+
+async def smart_semantic_extract(page, target_url: str, target_count: int = 10) -> List[Dict[str, Any]]:
+    """通用的 DOM 增强型备用提取引擎（支持单页/卡片布局）"""
+    extracted_items = []
+    seen_titles = set()
+
+    # 1. 尝试表格结构
+    try:
+        rows = await page.query_selector_all("table tbody tr, table tr")
+        if rows and len(rows) > 0:
+            for row in rows:
+                tds = await row.query_selector_all("td, th")
+                if len(tds) >= 2:
+                    texts = [(await td.text_content()).strip() for td in tds]
+                    formatted_item = " | ".join(t for t in texts if t)
+                    if formatted_item and formatted_item not in seen_titles:
+                        seen_titles.add(formatted_item)
+                        extracted_items.append({"title": formatted_item, "url": target_url})
+                        if len(extracted_items) >= target_count:
+                            return extracted_items
+            if len(extracted_items) > 0:
+                return extracted_items
+    except Exception:
+        pass
+
+    # 2. 纯结构 DOM 块/卡片/链接通用提取
+    try:
+        candidate_elements = await page.evaluate("""() => {
+            const nodes = Array.from(document.querySelectorAll('a[href], article, section, h1, h2, h3, h4, div[class*="title"], div[class*="card"], div[class*="item"]'));
+            const results = [];
+            for (const el of nodes) {
+                const text = (el.innerText || el.textContent || '').trim();
+                if (!text || text.length < 4) continue;
+                // 过滤掉包含大量换行的顶层大容器
+                if (text.split('\\n').length > 5) continue;
+                const href = el.getAttribute ? (el.getAttribute('href') || '') : '';
+                results.push({ text: text.replace(/\\s+/g, ' '), href: href });
+            }
+            return results;
+        }""")
+
+        for item in candidate_elements:
+            t = item["text"]
+            if t not in seen_titles:
+                seen_titles.add(t)
+                extracted_items.append({"title": t, "url": item["href"] or target_url})
+                if len(extracted_items) >= target_count:
+                    break
+    except Exception as e:
+        print(f"  DOM 提取提示: {e}")
+
+    return extracted_items
 
 
 async def screenshot_sender():
-    global pending_nav_url, pending_task_text, agent_paused
-    await asyncio.sleep(2)
+    global agent_paused
+    await asyncio.sleep(1.5)
     async with async_playwright() as p:
         print(f"▶ 启动 Chromium 浏览器实例 (BROWSER_HEADLESS={IS_HEADLESS}) ...")
         browser = await p.chromium.launch(
@@ -464,160 +524,90 @@ async def screenshot_sender():
         )
         page = await context.new_page()
         current_loaded_url = ""
-        print("▶ 截图采集端启动就绪，保持初始待机状态，等待下发任务...")
-
+        print("▶ 截图采集端启动就绪，保持 Context 处于待机状态，准备接收串行任务...")
 
         try:
             async with websockets.connect(f"ws://localhost:{WS_PORT}") as ws:
-                print("✅ 智能商品与文章提取引擎（带普通菜单过滤）就绪...")
+                print("✅ 复杂 Browser-Use 串行 Sidecar 引擎连接成功...")
                 frame_seq = 0
                 last_hash = ""
 
                 while True:
                     t_start = time.time()
 
-                    if pending_task_text and not agent_paused:
-                        task_text = pending_task_text
-                        task_mode = pending_task_mode
-                        target = pending_nav_url or current_loaded_url
-                        pending_task_text = ""
-                        pending_nav_url = None
+                    if not task_queue.empty() and not agent_paused:
+                        task_item = await task_queue.get()
+                        task_text = task_item["text"]
+                        task_mode = task_item["mode"]
+                        target_url = task_item["url"] or current_loaded_url
 
-                        print(f"▶ 收到任务需求: Mode={task_mode}, URL={target}, Text=\"{task_text}\"")
+                        print(f"▶ 开始处理串行任务: Mode={task_mode}, URL={target_url}, Text=\"{task_text}\"")
 
                         try:
-                            if target != current_loaded_url:
-                                print(f"▶ 驱动 Chromium 导航跳转至目标 URL: {target} ...")
-                                await page.goto(target, wait_until="domcontentloaded", timeout=15000)
-                                current_loaded_url = target
-                                await broadcast_json({"type": "url_changed", "url": target})
+                            if target_url and target_url != current_loaded_url:
+                                print(f"▶ 驱动 Chromium 导航至目标 URL: {target_url} ...")
+                                await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                                current_loaded_url = target_url
+                                await broadcast_json({"type": "url_changed", "url": target_url})
 
-                            # 导航后同步刷 2 帧，确保用户优先看到新网页打开
                             await flush_screen_frames(page, ws, count=2)
 
                             is_blocked = await detect_captcha_or_login(page)
                             if is_blocked:
-                                print(f"⚠️ [反爬告警] 目标站点 ({target}) 触发了验证码/频控！自动切窗口至前台...")
+                                print(f"⚠️ [反爬告警] 目标站点 ({target_url}) 触发了验证码/风控！自动切窗口至前台...")
                                 agent_paused = True
                                 await broadcast_json({
                                     "type": "human_intervention_required",
-                                    "reason": "检测到目标站点提示“验证码/操作过于频繁”，已强行将窗口弹出至最前台，请在原生窗口中完成验证。",
-                                    "targetUrl": target,
+                                    "reason": "检测到目标站点提示“验证码/操作过于频繁”，已将窗口切至前台，请手动完成验证后点击恢复。",
+                                    "targetUrl": target_url,
                                 })
                                 bring_window_to_foreground()
+                                task_queue.task_done()
                                 continue
 
-                            if task_mode == "write" or "fill-form.html" in target:
-                                print("✍️ 进入纯通用表单智能探针填报流程...")
-                                kv_payload = extract_generic_kv_from_text(task_text)
-                                print(f"🤖 纯通用自然语言 Payload 智能抽取结果: {kv_payload}")
+                            # 1. 尝试提取指令中的所有物理点击/悬停/滚动目标（如 ['技术', '纯电技术', '拉取滚动']）
+                            click_targets = extract_all_click_targets(task_text)
+                            if click_targets:
+                                print(f"🖱️ 捕获到 {len(click_targets)} 个串行物理点击/悬停/滚动目标: {click_targets}")
+                                await execute_sequential_clicks(page, click_targets, ws)
 
-                                # 纯通用零硬编码：调用纯通用 DOM 智能探针自动探测与对齐填充
-                                await generic_auto_fill_form(page, kv_payload)
+                            target_count = extract_target_count(task_text)
 
-                                # 填充后刷帧给前端，让用户看清输入的表单项
-                                await flush_screen_frames(page, ws, count=3)
-
-                                submission_id = f"sub_{int(time.time())}_{hashlib.md5(task_text.encode()).hexdigest()[:6]}"
-                                print(f"🛑 触发 WAITING_APPROVAL_SUBMIT 机制，等待前端提交确认 (submissionId={submission_id})...")
-
-                                submit_approval_event.clear()
-                                await broadcast_json({
-                                    "type": "waiting_approval_submit",
-                                    "submissionId": submission_id,
-                                    "targetUrl": target,
-                                    "formData": kv_payload
-                                })
-
-                                # 等待用户在前端二步授权弹窗中确认
-                                await submit_approval_event.wait()
-
-                                if submit_approval_result:
-                                    print("✅ 用户已授权提交！执行物理按钮点击...")
-                                    if await page.query_selector("#submit-btn"):
-                                        await page.click("#submit-btn")
-
-                                    # 提交后强制刷帧 3 次，展示提交后的成功回执界面
-                                    await flush_screen_frames(page, ws, count=3)
-                                    await asyncio.sleep(1.0)
-
-                                    await broadcast_json({
-                                        "type": "task_result",
-                                        "mode": "write",
-                                        "targetUrl": target,
-                                        "submissionId": submission_id,
-                                        "taskText": task_text,
-                                        "items": [{"title": "成功提交采购申报表单", "url": target}]
-                                    })
-                                else:
-                                    print("❌ 用户拒绝了表单提交！")
+                            # 2. 如果配置了 LLM，则由 Browser Use Agent 继续深度驱动并结构化抽取
+                            if DEEPSEEK_API_KEY or OPENAI_API_KEY:
+                                task_result_schema = await run_browser_use_agent_serial(page, task_text, ws)
+                                items_to_return = [
+                                    {"title": item.title, "url": item.url or page.url, "details": item.details}
+                                    for item in task_result_schema.extracted_items
+                                ]
                             else:
-                                is_multi_step = any(k in task_text for k in ["点击", "然后", "再", "进入", "找到"])
-                                if DEEPSEEK_API_KEY and is_multi_step:
-                                    print("🤖 捕获到复合多步交互指令，启动官方 Browser Use Agent 全权自主执行...")
-                                    extracted_items = await run_browser_use_agent(page, task_text, ws)
-                                else:
-                                    click_target = extract_click_target(task_text)
-                                    if click_target:
-                                        print(f"🖱️ [通用点击探针] 捕获到物理点击指令: \"{click_target}\" ...")
-                                        await broadcast_json({
-                                            "type": "step_executed",
-                                            "action": f"驱动 Chromium 自动化寻址物理点击目标: \"{click_target}\"",
-                                            "locator": f"click(\"{click_target}\")"
-                                        })
+                                extracted = await smart_semantic_extract(page, page.url, target_count=target_count)
+                                items_to_return = extracted
+                                task_result_schema = TaskResultSchema(
+                                    status="success",
+                                    summary=f"已成功通过串行探针导航并提取 {len(extracted)} 条数据",
+                                    completed_steps=[task_text]
+                                )
 
-                                        click_success = False
-                                        try:
-                                            locator = page.get_by_text(click_target, exact=False).first
-                                            if await locator.count() > 0:
-                                                click_elem = locator
-                                            else:
-                                                click_elem = await page.query_selector(f"a:has-text('{click_target}'), button:has-text('{click_target}')")
+                            await flush_screen_frames(page, ws, count=3)
+                            await asyncio.sleep(0.5)
 
-                                            if click_elem:
-                                                try:
-                                                    await click_elem.click(timeout=4000)
-                                                except Exception:
-                                                    await click_elem.click(force=True, timeout=4000)
+                            print(f"✅ 成功完成串行任务，回传 {len(items_to_return)} 条结构化数据及执行结果...")
+                            await broadcast_json({
+                                "type": "task_result",
+                                "mode": task_mode,
+                                "targetUrl": page.url,
+                                "taskText": task_text,
+                                "count": len(items_to_return),
+                                "items": items_to_return,
+                                "summary": task_result_schema.summary,
+                                "completedSteps": task_result_schema.completed_steps
+                            })
 
-                                                print(f"  ✓ 成功驱动 Chromium 物理点击 [{click_target}]，等待目标页面渲染...")
-                                                await broadcast_json({
-                                                    "type": "step_executed",
-                                                    "action": f"成功驱动 Chromium 物理点击网页目标: \"{click_target}\"",
-                                                    "locator": f"click(\"{click_target}\")"
-                                                })
-                                                await asyncio.sleep(3.0)
-                                                await flush_screen_frames(page, ws, count=3)
-                                            else:
-                                                print(f"  ⚠ 未在当前页面找到包含文本 \"{click_target}\" 的可点击控件")
-                                        except Exception as click_err:
-                                            print(f"  物理点击执行提示: {click_err}")
-
-
-
-                                    target_count = extract_target_count(task_text)
-                                    print(f"🤖 智能解析目标提取数量: {target_count} 条，启动 AI 抽取引擎 (带菜单过滤)...")
-                                    extracted_items = await smart_semantic_extract(page, target, target_count=target_count)
-
-
-
-                                # 抽取完成后，先刷帧确保页面呈现出当前浏览位置，再延时 1s 回传结果，保证视觉同步
-                                await flush_screen_frames(page, ws, count=3)
-                                await asyncio.sleep(1.0)
-
-                                print(f"✅ 成功精准提取到 {len(extracted_items)} 条数据，回传 Chat 框...")
-                                await broadcast_json({
-                                    "type": "task_result",
-                                    "mode": "read",
-                                    "targetUrl": target,
-                                    "taskText": task_text,
-                                    "count": len(extracted_items),
-                                    "items": extracted_items
-                                })
-
-                        except Exception as nav_err:
-                            print(f"⚠ 跳转/提取异常: {nav_err}")
-
+                        except Exception as task_err:
+                            print(f"⚠ 任务执行过程发生异常: {task_err}")
+                        finally:
+                            task_queue.task_done()
 
                     try:
                         screenshot_bytes = await page.screenshot(
@@ -648,23 +638,23 @@ async def screenshot_sender():
                     await asyncio.sleep(max(0.2, sleep_time))
 
         except Exception as e:
-            print(f"❌ 截图发送异常：{e}")
+            print(f"❌ 截图与通信引擎异常：{e}")
         finally:
             await browser.close()
 
 
 async def main():
-    print(f"▶ 启动 WebSocket 服务端 ws://127.0.0.1:{WS_PORT} ...")
+    print(f"▶ 启动 Sidecar WebSocket 服务端 ws://127.0.0.1:{WS_PORT} ...")
     try:
         server = await websockets.serve(handler, "127.0.0.1", WS_PORT)
     except OSError as err:
         if err.errno == 10048:
-            print(f"⚠️ 端口 {WS_PORT} 已被先前运行的进程占用，请先关闭正在运行的 Python 进程。")
+            print(f"⚠️ 端口 {WS_PORT} 已被占用，请确保先关闭运行中的旧 Sidecar 进程。")
             return
         raise err
-    print("✅ 智能商业提取与菜单过滤引擎已运行！")
+    print("✅ 复杂 Browser-Use 串行任务引擎初始化就绪！")
     await asyncio.gather(server.wait_closed(), screenshot_sender())
+
 
 if __name__ == "__main__":
     asyncio.run(main())
-
