@@ -13,15 +13,26 @@ import re
 import struct
 import sys
 import time
+import os
 from pathlib import Path
 import websockets
+from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+
+# 加载根目录 .env
+env_path = Path(__file__).resolve().parents[3] / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# 读取无头模式配置 (默认 false: 可见原生窗口)
+IS_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
+
 
 if sys.platform == "win32":
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 SW_RESTORE = 9
+
 
 def bring_window_to_foreground(keyword: str = "Chrome") -> bool:
     if sys.platform != "win32":
@@ -279,13 +290,15 @@ async def screenshot_sender():
     global pending_nav_url, pending_task_text, agent_paused
     await asyncio.sleep(2)
     async with async_playwright() as p:
+        print(f"▶ 启动 Chromium 浏览器实例 (BROWSER_HEADLESS={IS_HEADLESS}) ...")
         browser = await p.chromium.launch(
-            headless=False,
+            headless=IS_HEADLESS,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
             ]
         )
+
         context = await browser.new_context(
             viewport={"width": 1280, "height": 720},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -438,10 +451,17 @@ async def screenshot_sender():
 
 
 async def main():
-    print(f"▶ 启动 WebSocket 服务端 ws://localhost:{WS_PORT} ...")
-    server = await websockets.serve(handler, "localhost", WS_PORT)
+    print(f"▶ 启动 WebSocket 服务端 ws://127.0.0.1:{WS_PORT} ...")
+    try:
+        server = await websockets.serve(handler, "127.0.0.1", WS_PORT)
+    except OSError as err:
+        if err.errno == 10048:
+            print(f"⚠️ 端口 {WS_PORT} 已被先前运行的进程占用，请先关闭正在运行的 Python 进程或在任务管理器中结束它。")
+            return
+        raise err
     print("✅ 智能商业提取与菜单过滤引擎已运行！")
     await asyncio.gather(server.wait_closed(), screenshot_sender())
 
 if __name__ == "__main__":
     asyncio.run(main())
+
