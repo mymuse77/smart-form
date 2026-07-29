@@ -106,6 +106,7 @@ function connectWebSocket() {
           const msg = JSON.parse(event.data);
           if (msg.type === 'url_changed' && msg.url) {
             currentUrl.value = msg.url;
+            markRunningStepsAsSuccess();
           } else if (msg.type === 'human_intervention_required') {
             handleHumanInterventionRequired(msg);
           } else if (msg.type === 'waiting_approval_submit') {
@@ -127,6 +128,14 @@ function connectWebSocket() {
   }
 }
 
+function markRunningStepsAsSuccess() {
+  steps.value.forEach((step) => {
+    if (step.status === 'RUNNING') {
+      step.status = 'SUCCESS';
+    }
+  });
+}
+
 function handleHumanInterventionRequired(msg: any) {
   agentState.value = 'WAITING_HUMAN';
   const warningText = `⚠️ <strong>检测到目标站点触发了反爬/滑块验证码保护！</strong><br/>已自动为您将本地 Chromium 窗口弹出至最前台。<br/>请在弹出的原生浏览器中完成滑块验证/登录，完成后点击顶栏右侧的 <span style="background:#34a853;color:#fff;padding:2px 6px;border-radius:4px;">恢复 Agent</span> 按钮以继续自动化流程。`;
@@ -141,6 +150,7 @@ function handleHumanInterventionRequired(msg: any) {
 }
 
 function handleWaitingApprovalSubmit(msg: any) {
+  markRunningStepsAsSuccess();
   agentState.value = 'WAITING_APPROVAL_SUBMIT';
   activeSubmissionId.value = msg.submissionId || `sub_${Date.now()}`;
   previewFormData.value = msg.formData || { title: '采购申请', amount: 50000 };
@@ -174,6 +184,11 @@ function onSubmitReject() {
   submitPreviewVisible.value = false;
   agentState.value = 'CANCELLED';
   isTaskRunning.value = false;
+  steps.value.forEach((step) => {
+    if (step.status === 'RUNNING' || step.status === 'WAITING') {
+      step.status = 'FAILED';
+    }
+  });
   steps.value.push({
     action: `[用户拒绝] 用户拒绝了表单提交，取消当前填报任务`,
     status: 'FAILED',
@@ -189,6 +204,7 @@ function onSubmitReject() {
 }
 
 function handleTaskResult(msg: any) {
+  markRunningStepsAsSuccess();
   const items = msg.items || [];
   collectedCount.value = items.length;
   isTaskRunning.value = false; // 恢复任务运行标记
@@ -213,6 +229,7 @@ function handleTaskResult(msg: any) {
     status: 'SUCCESS',
   });
 }
+
 
 function escapeHtml(str: string): string {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
