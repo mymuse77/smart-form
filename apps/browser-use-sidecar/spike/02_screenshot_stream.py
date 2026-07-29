@@ -90,7 +90,11 @@ def encode_frame(
 clients = set()
 pending_nav_url = None
 pending_task_text = ""
+pending_task_mode = "read"
 agent_paused = False
+
+submit_approval_event = asyncio.Event()
+submit_approval_result = False
 
 def extract_clean_url(text: str) -> str | None:
     match = re.search(r'https?://[a-zA-Z0-9.\-]+(?::\d+)?(?:/[^\s\u4e00-\u9fa5,"\'“”‘’()]*)?', text)
@@ -112,7 +116,7 @@ def extract_target_count(text: str) -> int:
 
 
 async def handler(ws):
-    global pending_nav_url, pending_task_text, agent_paused
+    global pending_nav_url, pending_task_text, pending_task_mode, agent_paused, submit_approval_result
     clients.add(ws)
     try:
         async for message in ws:
@@ -127,13 +131,20 @@ async def handler(ws):
                     msg_type = data.get('type')
                     if msg_type == 'task':
                         text = data.get('text', '')
-                        print(f"  [WS 服务端] 收到任务指令: {text}")
+                        mode = data.get('mode', 'read')
+                        print(f"  [WS 服务端] 收到任务指令: {text} (模式: {mode})")
                         pending_task_text = text
+                        pending_task_mode = mode
                         agent_paused = False
-                        clean_url = extract_clean_url(text)
+                        clean_url = extract_clean_url(text) or data.get('url')
                         if clean_url:
                             pending_nav_url = clean_url
                             print(f"  ⚡ 捕获到规范的目标 URL: {pending_nav_url}")
+                    elif msg_type == 'submit_approval_result':
+                        approved = data.get('approved', False)
+                        print(f"  [高危确认] 收到用户提交审核结果: {approved}")
+                        submit_approval_result = approved
+                        submit_approval_event.set()
                     elif msg_type == 'control':
                         action = data.get('action')
                         if action == 'takeover':
@@ -150,6 +161,7 @@ async def handler(ws):
         pass
     finally:
         clients.discard(ws)
+
 
 
 async def broadcast_json(msg: dict):
@@ -292,17 +304,23 @@ async def screenshot_sender():
                 while True:
                     t_start = time.time()
 
-                    if pending_nav_url and pending_nav_url != current_loaded_url and not agent_paused:
-                        target = pending_nav_url
+                    if pending_task_text and not agent_paused:
+                        task_text = pending_task_text
+                        task_mode = pending_task_mode
+                        target = pending_nav_url or current_loaded_url
+                        pending_task_text = ""
                         pending_nav_url = None
-                        print(f"▶ 驱动 Chromium 导航跳转至规范 URL: {target} ...")
-                        try:
-                            await page.goto(target, wait_until="domcontentloaded", timeout=15000)
-                            current_loaded_url = target
-                            print(f"✅ 成功导航至: {target}")
-                            await broadcast_json({"type": "url_changed", "url": target})
 
-                            await asyncio.sleep(1.5)
+                        print(f"▶ 收到任务需求: Mode={task_mode}, URL={target}, Text=\"{task_text}\"")
+
+                        try:
+                            if target != current_loaded_url:
+                                print(f"▶ 驱动 Chromium 导航跳转至目标 URL: {target} ...")
+                                await page.goto(target, wait_until="domcontentloaded", timeout=15000)
+                                current_loaded_url = target
+                                await broadcast_json({"type": "url_changed", "url": target})
+
+                            await asyncio.sleep(1.0)
                             is_blocked = await detect_captcha_or_login(page)
 
                             if is_blocked:
@@ -316,19 +334,71 @@ async def screenshot_sender():
                                 bring_window_to_foreground()
                                 continue
 
-                            target_count = extract_target_count(pending_task_text)
-                            print(f"🤖 智能解析目标提取数量: {target_count} 条，启动 AI 抽取引擎 (带菜单过滤)...")
+                            if task_mode == "write" or "fill-form.html" in target:
+                                print("✍️ 进入填报模式沙箱流程...")
+                                try:
+                                    # 自动填充字段
+                                    if await page.query_selector("#applicant"):
+                                        await page.fill("#applicant", "张伟 (采购部)")
+                                    if await page.query_selector("#projectName"):
+                                        await page.fill("#projectName", "智能办公高配终端采购计划")
+                                    if await page.query_selector("#category"):
+                                        await page.select_option("#category", value="hardware")
+                                    if await page.query_selector("#budget"):
+                                        await page.fill("#budget", "85000")
+                                except Exception as fill_err:
+                                    print(f"  填报输入捕获提示: {fill_err}")
 
-                            extracted_items = await smart_semantic_extract(page, target, target_count=target_count)
+                                submission_id = f"sub_{int(time.time())}_{hashlib.md5(task_text.encode()).hexdigest()[:6]}"
+                                print(f"🛑 触发 WAITING_APPROVAL_SUBMIT 机制，等待前端高危提交确认 (submissionId={submission_id})...")
 
-                            print(f"✅ 成功精准提取到 {len(extracted_items)} 条数据，回传 Chat 框...")
-                            await broadcast_json({
-                                "type": "task_result",
-                                "targetUrl": target,
-                                "taskText": pending_task_text,
-                                "count": len(extracted_items),
-                                "items": extracted_items
-                            })
+                                submit_approval_event.clear()
+                                await broadcast_json({
+                                    "type": "waiting_approval_submit",
+                                    "submissionId": submission_id,
+                                    "targetUrl": target,
+                                    "formData": {
+                                        "申请人": "张伟 (采购部)",
+                                        "项目名称": "智能办公高配终端采购计划",
+                                        "采购类别": "IT 硬件设备",
+                                        "预算金额": "85,000 元"
+                                    }
+                                })
+
+                                # 等待用户在前端二步授权弹窗中确认
+                                await submit_approval_event.wait()
+
+                                if submit_approval_result:
+                                    print("✅ 用户已授权提交！执行物理按钮点击...")
+                                    if await page.query_selector("#submit-btn"):
+                                        await page.click("#submit-btn")
+                                    await asyncio.sleep(1.0)
+
+                                    await broadcast_json({
+                                        "type": "task_result",
+                                        "mode": "write",
+                                        "targetUrl": target,
+                                        "submissionId": submission_id,
+                                        "taskText": task_text,
+                                        "items": [{"title": "成功提交采购申报表单", "url": target}]
+                                    })
+                                else:
+                                    print("❌ 用户拒绝了表单提交！")
+                            else:
+                                target_count = extract_target_count(task_text)
+                                print(f"🤖 智能解析目标提取数量: {target_count} 条，启动 AI 抽取引擎 (带菜单过滤)...")
+
+                                extracted_items = await smart_semantic_extract(page, target, target_count=target_count)
+
+                                print(f"✅ 成功精准提取到 {len(extracted_items)} 条数据，回传 Chat 框...")
+                                await broadcast_json({
+                                    "type": "task_result",
+                                    "mode": "read",
+                                    "targetUrl": target,
+                                    "taskText": task_text,
+                                    "count": len(extracted_items),
+                                    "items": extracted_items
+                                })
 
                         except Exception as nav_err:
                             print(f"⚠ 跳转/提取异常: {nav_err}")

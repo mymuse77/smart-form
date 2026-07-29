@@ -4,6 +4,10 @@ export type TaskState =
   | 'MATCHING'
   | 'EXPLORING'
   | 'COLLECTING'
+  | 'FILLING'
+  | 'WAITING_APPROVAL_SUBMIT'
+  | 'SUBMITTING'
+  | 'SUBMIT_FAILED'
   | 'DATA_VALIDATING'
   | 'COMPILING'
   | 'REPLAYING'
@@ -21,6 +25,7 @@ export interface TaskContext {
   currentStep: number;
   maxSteps: number;
   collectedCount: number;
+  submissionId?: string;
   errorMsg?: string;
   humanReason?: string;
 }
@@ -34,6 +39,12 @@ export type TaskEvent =
   | { type: 'REQUIRE_HUMAN'; reason: string }
   | { type: 'HUMAN_RESUME' }
   | { type: 'COLLECT_PAGE'; count: number }
+  | { type: 'START_FILLING' }
+  | { type: 'REQUIRE_SUBMIT_APPROVAL'; submissionId: string }
+  | { type: 'APPROVE_SUBMIT' }
+  | { type: 'REJECT_SUBMIT' }
+  | { type: 'SUBMIT_SUCCESS' }
+  | { type: 'SUBMIT_FAIL'; error: string }
   | { type: 'VALIDATE_DONE' }
   | { type: 'COMPILE_DONE' }
   | { type: 'REPLAY_DONE' }
@@ -86,8 +97,11 @@ export class TaskStateMachine {
         break;
 
       case 'MATCHING':
-        if (event.type === 'MATCH_SUCCESS') this.currentState = 'COLLECTING';
-        else if (event.type === 'MATCH_FAIL') this.currentState = 'EXPLORING';
+        if (event.type === 'MATCH_SUCCESS') {
+          this.currentState = this.context.mode === 'write' ? 'FILLING' : 'COLLECTING';
+        } else if (event.type === 'MATCH_FAIL') {
+          this.currentState = 'EXPLORING';
+        }
         break;
 
       case 'EXPLORING':
@@ -99,6 +113,8 @@ export class TaskStateMachine {
         } else if (event.type === 'COLLECT_PAGE') {
           this.currentState = 'COLLECTING';
           this.context.collectedCount += event.count;
+        } else if (event.type === 'START_FILLING') {
+          this.currentState = 'FILLING';
         }
         break;
 
@@ -113,9 +129,36 @@ export class TaskStateMachine {
         }
         break;
 
+      case 'FILLING':
+        if (event.type === 'REQUIRE_SUBMIT_APPROVAL') {
+          this.currentState = 'WAITING_APPROVAL_SUBMIT';
+          this.context.submissionId = event.submissionId;
+        } else if (event.type === 'REQUIRE_HUMAN') {
+          this.currentState = 'WAITING_HUMAN';
+          this.context.humanReason = event.reason;
+        }
+        break;
+
+      case 'WAITING_APPROVAL_SUBMIT':
+        if (event.type === 'APPROVE_SUBMIT') {
+          this.currentState = 'SUBMITTING';
+        } else if (event.type === 'REJECT_SUBMIT') {
+          this.currentState = 'CANCELLED';
+        }
+        break;
+
+      case 'SUBMITTING':
+        if (event.type === 'SUBMIT_SUCCESS') {
+          this.currentState = 'SUCCEEDED';
+        } else if (event.type === 'SUBMIT_FAIL') {
+          this.currentState = 'SUBMIT_FAILED';
+          this.context.errorMsg = event.error;
+        }
+        break;
+
       case 'WAITING_HUMAN':
         if (event.type === 'HUMAN_RESUME') {
-          this.currentState = 'EXPLORING';
+          this.currentState = this.context.mode === 'write' ? 'FILLING' : 'EXPLORING';
           this.context.humanReason = undefined;
         }
         break;
@@ -134,11 +177,11 @@ export class TaskStateMachine {
     }
 
     // 全局通用转换
-    if (event.type === 'PAUSE' && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(this.currentState)) {
+    if (event.type === 'PAUSE' && !['SUCCEEDED', 'FAILED', 'CANCELLED', 'SUBMITTING'].includes(this.currentState)) {
       this.currentState = 'PAUSED';
     } else if (event.type === 'RESUME' && this.currentState === 'PAUSED') {
-      this.currentState = 'EXPLORING';
-    } else if (event.type === 'CANCEL') {
+      this.currentState = this.context.mode === 'write' ? 'FILLING' : 'EXPLORING';
+    } else if (event.type === 'CANCEL' && this.currentState !== 'SUBMITTING') { // SUBMITTING 不可逆，禁止 CANCEL
       this.currentState = 'CANCELLED';
     } else if (event.type === 'FAIL') {
       this.currentState = 'FAILED';
@@ -156,3 +199,4 @@ export class TaskStateMachine {
     this.listeners.forEach((listener) => listener(this.currentState, this.getContext()));
   }
 }
+

@@ -21,6 +21,14 @@
       :error-count="errorCount"
       :runtime-str="runtimeStr"
     />
+    <SubmitPreviewPanel
+      :visible="submitPreviewVisible"
+      :target-url="currentUrl"
+      :submission-id="activeSubmissionId"
+      :form-data="previewFormData"
+      @approve="onSubmitApprove"
+      @reject="onSubmitReject"
+    />
   </div>
 </template>
 
@@ -31,6 +39,7 @@ import ChatPanel from './components/ChatPanel.vue';
 import WorkspacePanel from './components/WorkspacePanel.vue';
 import ExecutionPanel, { ExecutionStep } from './components/ExecutionPanel.vue';
 import BottomBar from './components/BottomBar.vue';
+import SubmitPreviewPanel from './components/SubmitPreviewPanel.vue';
 
 const agentState = ref('RUNNING');
 const currentUrl = ref('http://localhost:8080/table.html');
@@ -41,10 +50,15 @@ const runtimeStr = ref('00:02:15');
 const isTaskRunning = ref(false);
 const chatPanelRef = ref<any>(null);
 
+// 填报提交预览控制
+const submitPreviewVisible = ref(false);
+const activeSubmissionId = ref('');
+const previewFormData = ref<Record<string, any>>({});
+
 // 初始化首屏提示步骤
 const steps = ref<ExecutionStep[]>([
   { action: '连接本地 Chromium 独立 Profile 成功', status: 'SUCCESS' },
-  { action: '准备就绪，等待下发自然语言采集指令...', status: 'SUCCESS' },
+  { action: '准备就绪，支持下发采集（Read）或填报（Write）指令...', status: 'SUCCESS' },
 ]);
 
 let socket: WebSocket | null = null;
@@ -94,6 +108,8 @@ function connectWebSocket() {
             currentUrl.value = msg.url;
           } else if (msg.type === 'human_intervention_required') {
             handleHumanInterventionRequired(msg);
+          } else if (msg.type === 'waiting_approval_submit') {
+            handleWaitingApprovalSubmit(msg);
           } else if (msg.type === 'task_result') {
             handleTaskResult(msg);
           }
@@ -113,7 +129,7 @@ function connectWebSocket() {
 
 function handleHumanInterventionRequired(msg: any) {
   agentState.value = 'WAITING_HUMAN';
-  const warningText = `⚠️ <strong>检测到目标站点触发了反爬/滑块验证码保护！</strong><br/>已自动为您将本地 Chromium 窗口弹出至最前台。<br/>请在弹出的原生浏览器中完成滑块验证/登录，完成后点击顶栏右侧的 <span style="background:#34a853;color:#fff;padding:2px 6px;border-radius:4px;">恢复 Agent</span> 按钮以继续自动化采集。`;
+  const warningText = `⚠️ <strong>检测到目标站点触发了反爬/滑块验证码保护！</strong><br/>已自动为您将本地 Chromium 窗口弹出至最前台。<br/>请在弹出的原生浏览器中完成滑块验证/登录，完成后点击顶栏右侧的 <span style="background:#34a853;color:#fff;padding:2px 6px;border-radius:4px;">恢复 Agent</span> 按钮以继续自动化流程。`;
   if (chatPanelRef.value?.addAssistantReply) {
     chatPanelRef.value.addAssistantReply(warningText);
   }
@@ -124,24 +140,76 @@ function handleHumanInterventionRequired(msg: any) {
   });
 }
 
+function handleWaitingApprovalSubmit(msg: any) {
+  agentState.value = 'WAITING_APPROVAL_SUBMIT';
+  activeSubmissionId.value = msg.submissionId || `sub_${Date.now()}`;
+  previewFormData.value = msg.formData || { title: '采购申请', amount: 50000 };
+  submitPreviewVisible.value = true;
+
+  steps.value.push({
+    action: `[填报拦截] 准备提交表单数据，触发 WAITING_APPROVAL_SUBMIT 高危人工确认`,
+    locator: `requestSubmitApproval()`,
+    status: 'WAITING',
+  });
+}
+
+function onSubmitApprove() {
+  submitPreviewVisible.value = false;
+  agentState.value = 'SUBMITTING';
+  steps.value.push({
+    action: `[用户授权] 已人工确认提交！发送授权指令，执行网页提交按钮点击`,
+    status: 'RUNNING',
+  });
+
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: 'submit_approval_result',
+      approved: true,
+      submissionId: activeSubmissionId.value,
+    }));
+  }
+}
+
+function onSubmitReject() {
+  submitPreviewVisible.value = false;
+  agentState.value = 'CANCELLED';
+  isTaskRunning.value = false;
+  steps.value.push({
+    action: `[用户拒绝] 用户拒绝了表单提交，取消当前填报任务`,
+    status: 'FAILED',
+  });
+
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: 'submit_approval_result',
+      approved: false,
+      submissionId: activeSubmissionId.value,
+    }));
+  }
+}
+
 function handleTaskResult(msg: any) {
   const items = msg.items || [];
   collectedCount.value = items.length;
   isTaskRunning.value = false; // 恢复任务运行标记
 
-  let replyHtml = `<strong>🎉 采集完成！成功提取到 ${items.length} 条数据：</strong><ol style="margin-top:6px;padding-left:18px;">`;
-  items.forEach((item: any) => {
-    replyHtml += `<li style="margin-bottom:4px;"><strong>${escapeHtml(item.title)}</strong></li>`;
-  });
-  replyHtml += `</ol>`;
+  let replyHtml = `<strong>🎉 任务完成！</strong>`;
+  if (msg.mode === 'write') {
+    replyHtml += `<br/>成功在目标表单填写并完成提交，提交回执凭证：<code>${activeSubmissionId.value || 'sub_success'}</code>`;
+  } else {
+    replyHtml += `成功提取到 ${items.length} 条数据：<ol style="margin-top:6px;padding-left:18px;">`;
+    items.forEach((item: any) => {
+      replyHtml += `<li style="margin-bottom:4px;"><strong>${escapeHtml(item.title)}</strong></li>`;
+    });
+    replyHtml += `</ol>`;
+  }
 
   if (chatPanelRef.value?.addAssistantReply) {
     chatPanelRef.value.addAssistantReply(replyHtml);
   }
 
   steps.value.push({
-    action: `成功完成当次采集！提取出 ${items.length} 条项目数据并已回传 Chat 聊天框`,
-    locator: `page.query_selector_all(...)`,
+    action: msg.mode === 'write' ? `成功完成自动化表单填报与提交` : `成功完成当次采集！提取出 ${items.length} 条项目数据`,
     status: 'SUCCESS',
   });
 }
@@ -180,16 +248,21 @@ function onSendTask(taskText: string) {
   // 1. 强隔离：清空重置右侧步骤明细，只保留当次会话过程
   steps.value = [];
 
+  const isWriteMode = taskText.includes('填') || taskText.includes('写') || taskText.includes('提交') || taskText.includes('fill');
+  const taskMode = isWriteMode ? 'write' : 'read';
+
   const matchUrl = taskText.match(/https?:\/\/[^\s]+/);
   if (matchUrl) {
     currentUrl.value = matchUrl[0];
+  } else if (isWriteMode && !taskText.includes('http')) {
+    currentUrl.value = 'http://localhost:8080/fill-form.html';
   }
 
   // 2. 标记当前任务在运行中 (显示停止图标，禁用重复发送)
   isTaskRunning.value = true;
 
   steps.value.push({
-    action: `[新会话] 接收自然语言采集指令: "${taskText}"`,
+    action: `[新会话] 接收自然语言<sup>${taskMode === 'write' ? '填报' : '采集'}</sup>指令: "${taskText}"`,
     status: 'RUNNING',
   });
 
@@ -202,6 +275,7 @@ function onSendTask(taskText: string) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({
       type: 'task',
+      mode: taskMode,
       text: taskText,
       url: currentUrl.value,
       timestamp: Date.now()
@@ -212,16 +286,17 @@ function onSendTask(taskText: string) {
 function onStopTask() {
   isTaskRunning.value = false;
   steps.value.push({
-    action: `[用户操作] 已手动中断/停止当前采集任务`,
+    action: `[用户操作] 已手动中断/停止当前任务`,
     status: 'FAILED',
   });
   if (chatPanelRef.value?.addAssistantReply) {
-    chatPanelRef.value.addAssistantReply('⏹ 用户已手动停止当次采集任务。');
+    chatPanelRef.value.addAssistantReply('⏹ 用户已手动停止当次自动化任务。');
   }
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: 'control', action: 'stop' }));
   }
 }
+
 </script>
 
 <style>

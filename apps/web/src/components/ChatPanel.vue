@@ -10,12 +10,31 @@
         <div class="content" v-html="msg.text"></div>
       </div>
     </div>
+    <div class="preset-section">
+      <div class="preset-title">💡 快捷演示指令 (点击一键尝试)：</div>
+      <div class="preset-pills">
+        <button
+          class="pill pill-fill"
+          :disabled="isTaskRunning"
+          @click="usePreset('请使用标准采购数据源，帮我填报 http://localhost:8080/fill-form.html')"
+        >
+          ✍️ 填报示例 (测试靶场)
+        </button>
+        <button
+          class="pill pill-read"
+          :disabled="isTaskRunning"
+          @click="usePreset('请帮我采集 http://localhost:8080/table.html 中的所有采购项目与预算金额')"
+        >
+          🔍 采集示例 (测试靶场)
+        </button>
+      </div>
+    </div>
     <div class="input-box">
       <input
         v-model="inputText"
         type="text"
         :disabled="isTaskRunning"
-        :placeholder="isTaskRunning ? '任务正在执行中，请等待回复或点击停止...' : '描述需要采集的目标网站与字段...'"
+        :placeholder="isTaskRunning ? '任务正在执行中，请等待回复或点击停止...' : '描述需要采集或填报的目标网站与数据...'"
         @keyup.enter="handleAction"
       />
       <button
@@ -32,6 +51,7 @@
     </div>
   </aside>
 </template>
+
 
 <script setup lang="ts">
 import { ref, nextTick } from 'vue';
@@ -54,6 +74,12 @@ const messages = ref<Message[]>([
 const inputText = ref('');
 const msgContainer = ref<HTMLElement | null>(null);
 
+function usePreset(prompt: string) {
+  if (props.isTaskRunning) return;
+  inputText.value = prompt;
+  send();
+}
+
 function handleAction() {
   if (props.isTaskRunning) {
     emit('stop-task');
@@ -61,6 +87,7 @@ function handleAction() {
     send();
   }
 }
+
 
 function send() {
   if (!inputText.value.trim()) return;
@@ -179,4 +206,45 @@ defineExpose({
 .icon-stop {
   font-size: 10px;
 }
+.preset-section {
+  padding: 8px 12px;
+  background: #f8f9fa;
+  border-top: 1px solid #e8e8e8;
+}
+.preset-title {
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 6px;
+}
+.preset-pills {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pill {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  text-align: left;
+  border: 1px solid #ddd;
+  cursor: pointer;
+  background: #fff;
+  transition: all 0.2s ease;
+}
+.pill:hover:not(:disabled) {
+  border-color: #1a1a1a;
+  background: #f0f4ff;
+}
+.pill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pill-fill {
+  color: #b31412;
+  font-weight: 500;
+}
+.pill-read {
+  color: #1b3bbb;
+}
 </style>
+

@@ -1,26 +1,31 @@
-import { TransformType } from './types';
+export type BuiltinTransformType =
+  | 'identity'
+  | 'trim'
+  | 'uppercase'
+  | 'lowercase'
+  | 'date_format_iso'
+  | 'to_number';
 
-export class SafeTransformEngine {
-  public static applyTransform(value: unknown, transformType?: TransformType): unknown {
-    if (value === null || value === undefined) return value;
-    const strVal = String(value);
+export class TransformEngine {
+  public static applyTransform(value: any, transform: BuiltinTransformType = 'identity'): any {
+    if (value === null || value === undefined) return '';
 
-    switch (transformType) {
+    switch (transform) {
       case 'trim':
-        return strVal.trim();
+        return String(value).trim();
       case 'uppercase':
-        return strVal.toUpperCase();
+        return String(value).toUpperCase();
       case 'lowercase':
-        return strVal.toLowerCase();
-      case 'date_format_iso':
-        try {
-          return new Date(strVal).toISOString().split('T')[0];
-        } catch {
-          return strVal;
-        }
-      case 'number_to_fixed_2':
-        const num = parseFloat(strVal);
-        return isNaN(num) ? strVal : num.toFixed(2);
+        return String(value).toLowerCase();
+      case 'date_format_iso': {
+        const d = new Date(value);
+        return isNaN(d.getTime()) ? String(value) : d.toISOString().split('T')[0];
+      }
+      case 'to_number': {
+        const num = Number(value);
+        return isNaN(num) ? 0 : num;
+      }
+      case 'identity':
       default:
         return value;
     }

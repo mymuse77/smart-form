@@ -75,7 +75,7 @@ smart-form/
 ### 1. 基础环境要求
 - **Node.js** `>= 20.0.0`
 - **pnpm** `>= 9.0.0`
-- **Python** `>= 3.12` 与 **uv** 工具链
+- **Python** `>= 3.11` 与 **uv** 工具链
 
 ### 2. 安装依赖与构建
 
@@ -119,7 +119,9 @@ uv run --directory apps/browser-use-sidecar python spike/02_screenshot_stream.py
 
 ## 💡 示例指令 (Example Prompts)
 
-在控制台左侧 Chat 框中直接体验：
+在控制台左侧 Chat 框中直接体验（支持点击预置按钮一键填入）：
+
+### 🔍 1. 数据采集示例 (Read Mode)
 
 1. **测试靶场采集**：
    > `请帮我采集 http://localhost:8080/table.html 中的所有采购项目与预算金额`
@@ -129,6 +131,18 @@ uv run --directory apps/browser-use-sidecar python spike/02_screenshot_stream.py
    > `采集 https://www.smzdm.com 的前10条商品信息，不要采集到普通菜单`
 
 ---
+
+### ✍️ 2. 智能表单填报示例 (Write Mode)
+
+1. **标准采购表单填报 (测试靶场沙箱)**：
+   > `请使用标准采购数据源，帮我填报 http://localhost:8080/fill-form.html`
+   *说明：系统将自动切换至 write 填报模式，读取 `DataSourceStore` 中的采购 Profile，在测试靶场页面中自动填充申请人、项目名称、采购类别与预算金额。在点击最终提交前，前端将强弹窗进入 `WAITING_APPROVAL_SUBMIT` 二次高危确认阶段，经用户审查点击授权后完成提交回执存根。*
+
+2. **自定义命令行数据填报**：
+   > `使用申请人"李明"，项目名称"AI大模型服务器扩容"，预算"120000"，填报 http://localhost:8080/fill-form.html`
+
+---
+
 
 ## 🔒 隐私与安全红线 (Privacy & Security)
 

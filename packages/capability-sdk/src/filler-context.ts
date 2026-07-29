@@ -1,4 +1,5 @@
 import { Page } from 'playwright';
+import { safeFillField } from './fill-field';
 
 export interface SubmitApprovalRequest {
   submissionId: string;
@@ -21,7 +22,7 @@ export class DefaultFillerContext implements FillerContext {
   ) {}
 
   public async fillField(selector: string, value: any): Promise<void> {
-    await this.page.fill(selector, String(value ?? ''));
+    await safeFillField(this.page, selector, value);
   }
 
   /**
@@ -36,3 +37,4 @@ export class DefaultFillerContext implements FillerContext {
     };
   }
 }
+
