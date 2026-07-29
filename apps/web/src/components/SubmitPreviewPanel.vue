@@ -3,7 +3,7 @@
     <div class="submit-preview-modal">
       <div class="modal-header">
         <div class="danger-tag">⚠️ WAITING_APPROVAL_SUBMIT</div>
-        <h3>填报任务高危提交确认</h3>
+        <h3>填报任务提交确认</h3>
       </div>
       <div class="modal-body">
         <p class="warning-text">即将向目标系统发送最终表单提交数据，此操作不可逆！</p>
@@ -45,7 +45,7 @@
           :class="{ armed: confirmStep === 1 }"
           @click="onConfirm"
         >
-          {{ confirmStep === 0 ? '确认提交 (高危)' : '再次点击以授权发送' }}
+          {{ confirmStep === 0 ? '确认提交' : '再次点击以授权发送' }}
         </button>
       </div>
     </div>
@@ -103,8 +103,8 @@ function onReject() {
   background: #1e1e2d;
   color: #fff;
   border-radius: 12px;
-  border: 1px solid #b31412;
-  box-shadow: 0 12px 32px rgba(179, 20, 18, 0.3);
+  border: 1px solid #f59e0b;
+  box-shadow: 0 12px 32px rgba(245, 158, 11, 0.3);
   padding: 20px;
 }
 .modal-header {
@@ -114,8 +114,8 @@ function onReject() {
   margin-bottom: 16px;
 }
 .danger-tag {
-  background: #b31412;
-  color: #fff;
+  background: #f59e0b;
+  color: #1e1e2d;
   font-size: 11px;
   font-weight: bold;
   padding: 3px 8px;
@@ -126,7 +126,7 @@ function onReject() {
   color: #fff;
 }
 .warning-text {
-  color: #ff6b6b;
+  color: #fbbf24;
   font-size: 13px;
   margin-bottom: 14px;
 }
@@ -189,8 +189,8 @@ th {
   cursor: pointer;
 }
 .btn-confirm-danger {
-  background: #b31412;
-  color: #fff;
+  background: #f59e0b;
+  color: #1e1e2d;
   border: none;
   padding: 8px 18px;
   border-radius: 6px;
@@ -199,7 +199,8 @@ th {
   transition: all 0.2s ease;
 }
 .btn-confirm-danger.armed {
-  background: #d32f2f;
+  background: #d97706;
+  color: #ffffff;
   animation: pulse 1s infinite;
 }
 @keyframes pulse {
@@ -208,3 +209,4 @@ th {
   100% { transform: scale(1); }
 }
 </style>
+

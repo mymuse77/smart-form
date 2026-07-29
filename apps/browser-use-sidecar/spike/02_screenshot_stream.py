@@ -15,7 +15,9 @@ import sys
 import time
 import os
 from pathlib import Path
+import websockets
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 
 # 加载根目录 .env
 env_path = Path(__file__).resolve().parents[3] / ".env"
@@ -23,6 +25,7 @@ load_dotenv(dotenv_path=env_path)
 
 # 读取无头模式配置 (默认 false: 可见原生窗口)
 IS_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
+
 
 if sys.platform == "win32":
     import io
@@ -261,6 +264,50 @@ async def smart_semantic_extract(page, target_url: str, target_count: int = 10) 
     return extracted_items
 
 
+def parse_fill_params(text: str) -> dict:
+    """从自然语言 Chat 指令文本中智能解析提取表单参数"""
+    params = {
+        "applicant": "张伟 (采购部)",
+        "projectName": "智能办公高配终端采购计划",
+        "category": "hardware",
+        "category_label": "IT 硬件设备",
+        "budget": "85000"
+    }
+
+    # 1. 匹配申请人
+    m_app = re.search(r'(?:申请人|姓名|用户|者)[：:\s"“\']*([^\s,，;；"”\'`]+)', text)
+    if m_app:
+        params["applicant"] = m_app.group(1).strip()
+
+    # 2. 匹配项目名称
+    m_proj = re.search(r'(?:项目名称|项目|采购项|主题)[：:\s"“\']*([^\s,，;；"”\'`]+)', text)
+    if m_proj:
+        params["projectName"] = m_proj.group(1).strip()
+
+    # 3. 匹配类别
+    if "软件" in text or "许可" in text:
+        params["category"] = "software"
+        params["category_label"] = "软件服务许可"
+    elif "办公" in text or "耗材" in text:
+        params["category"] = "office"
+        params["category_label"] = "办公用品"
+    elif "硬件" in text or "设备" in text:
+        params["category"] = "hardware"
+        params["category_label"] = "IT 硬件设备"
+
+    # 4. 匹配预算金额
+    m_budget = re.search(r'(?:预算|金额|价格|费用)[：:\s"“\']*(\d+)', text)
+    if not m_budget:
+        m_budget = re.search(r'(\d+)\s*(?:元|万)', text)
+    if m_budget:
+        val = m_budget.group(1).strip()
+        if "万" in text and int(val) < 1000:
+            val = str(int(val) * 10000)
+        params["budget"] = val
+
+    return params
+
+
 async def detect_captcha_or_login(page) -> bool:
     try:
         title = await page.title()
@@ -346,16 +393,19 @@ async def screenshot_sender():
 
                             if task_mode == "write" or "fill-form.html" in target:
                                 print("✍️ 进入填报模式沙箱流程...")
+                                fill_params = parse_fill_params(task_text)
+                                print(f"🤖 自然语言参数智能提取结果: {fill_params}")
+
                                 try:
-                                    # 自动填充字段
+                                    # 动态填充解析出的参数
                                     if await page.query_selector("#applicant"):
-                                        await page.fill("#applicant", "张伟 (采购部)")
+                                        await page.fill("#applicant", fill_params["applicant"])
                                     if await page.query_selector("#projectName"):
-                                        await page.fill("#projectName", "智能办公高配终端采购计划")
+                                        await page.fill("#projectName", fill_params["projectName"])
                                     if await page.query_selector("#category"):
-                                        await page.select_option("#category", value="hardware")
+                                        await page.select_option("#category", value=fill_params["category"])
                                     if await page.query_selector("#budget"):
-                                        await page.fill("#budget", "85000")
+                                        await page.fill("#budget", fill_params["budget"])
                                 except Exception as fill_err:
                                     print(f"  填报输入捕获提示: {fill_err}")
 
@@ -368,10 +418,10 @@ async def screenshot_sender():
                                     "submissionId": submission_id,
                                     "targetUrl": target,
                                     "formData": {
-                                        "申请人": "张伟 (采购部)",
-                                        "项目名称": "智能办公高配终端采购计划",
-                                        "采购类别": "IT 硬件设备",
-                                        "预算金额": "85,000 元"
+                                        "申请人": fill_params["applicant"],
+                                        "项目名称": fill_params["projectName"],
+                                        "采购类别": fill_params["category_label"],
+                                        "预算金额": f"{int(fill_params['budget']):,} 元"
                                     }
                                 })
 
@@ -448,10 +498,17 @@ async def screenshot_sender():
 
 
 async def main():
-    print(f"▶ 启动 WebSocket 服务端 ws://localhost:{WS_PORT} ...")
-    server = await websockets.serve(handler, "localhost", WS_PORT)
+    print(f"▶ 启动 WebSocket 服务端 ws://127.0.0.1:{WS_PORT} ...")
+    try:
+        server = await websockets.serve(handler, "127.0.0.1", WS_PORT)
+    except OSError as err:
+        if err.errno == 10048:
+            print(f"⚠️ 端口 {WS_PORT} 已被先前运行的进程占用，请先关闭正在运行的 Python 进程。")
+            return
+        raise err
     print("✅ 智能商业提取与菜单过滤引擎已运行！")
     await asyncio.gather(server.wait_closed(), screenshot_sender())
 
 if __name__ == "__main__":
     asyncio.run(main())
+
