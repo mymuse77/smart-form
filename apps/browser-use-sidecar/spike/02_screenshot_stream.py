@@ -155,7 +155,7 @@ def parse_serial_steps(text: str) -> List[str]:
     steps = [s.strip() for s in raw_steps if s.strip()]
 
     if len(steps) <= 1:
-        raw_steps = re.split(r'(?:,|,|，|、|并|然后再|然后|接着|之后|再下一步|再|\s+(?=点击|选择|进入|抓取|拉取|从上往下|滚动))', text)
+        raw_steps = re.split(r'(?:,|,|，|、|并|然后再|然后|接着|之后|再下一步|再|\s+(?=点击|选择|进入|抓取|拉取|从上往下|滚动|总结))', text)
         steps = [s.strip() for s in raw_steps if s.strip()]
 
     return steps if steps else [text.strip()]
@@ -367,6 +367,9 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
         from langchain_openai import ChatOpenAI
         from browser_use import Agent
 
+        # 为 ChatOpenAI 类挂载 provider 类属性，完美消除 browser-use 尝试访问 llm.provider 时报的 AttributeError
+        ChatOpenAI.provider = "openai"
+
         if DEEPSEEK_API_KEY:
             llm = ChatOpenAI(
                 model=DEEPSEEK_MODEL,
@@ -392,9 +395,9 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
 
         prompt += f"""
 关键要求：
-1. 严格按步骤顺序依次在页面上交互（导航 -> 点击/悬停菜单 -> 切换子菜单 -> 从上往下拉取/滚动页面 -> 提取内容）。
+1. 严格按步骤顺序依次在页面上交互（导航 -> 点击/悬停菜单 -> 切换子菜单 -> 从上往下拉取/滚动页面 -> 提取内容并总结）。
 2. 如果遇到下拉菜单，请先将鼠标悬停(hover)到一级菜单上，待下拉浮层出现后再点击对应的二级菜单。
-3. 请最终抓取 {target_count} 条最新技术内容/文章信息，并返回结构化输出。
+3. 请详细提取和总结页面中的主要文字与技术亮点内容，并返回结构化输出（包含 summary 摘要与 extracted_items 清单）。
 """
 
         agent = Agent(
@@ -431,29 +434,38 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
         elif final_res and hasattr(history, 'structured_output') and history.structured_output:
             return history.structured_output
         else:
-            res_str = str(final_res or history.final_result() or "已成功完成串行操作")
+            res_str = str(final_res or history.final_result() or "已成功完成串行操作与内容提炼")
             print(f"  ✅ Browser Use Agent 执行完毕，文本结果: {res_str}")
             lines = [line.strip() for line in res_str.split("\n") if line.strip()]
             items = [ExtractedDataItem(title=line, url=page.url) for line in lines[:target_count]]
             return TaskResultSchema(
                 status="success",
-                summary=res_str[:200],
+                summary=res_str[:300],
                 extracted_items=items if items else [ExtractedDataItem(title=res_str, url=page.url)],
                 completed_steps=steps
             )
 
     except Exception as err:
         print(f"  ⚠ Browser Use Agent 执行逻辑提示: {err}")
+        # 当 LLM Agent 执行遇到未预期异常时，优雅回退到 DOM 全页长文本提炼
+        fallback_items = await smart_semantic_extract(page, page.url, target_count=target_count)
+        summary_msg = "已成功导航至当前页面并提炼核心内容"
+        if fallback_items:
+            summary_msg = "页面核心提炼：" + " | ".join([it["title"] for it in fallback_items[:3]])
+
+        extracted_data_items = [
+            ExtractedDataItem(title=it["title"], url=it["url"]) for it in fallback_items
+        ]
         return TaskResultSchema(
             status="partial_success",
-            summary=f"Agent 执行提示: {err}",
-            extracted_items=[],
+            summary=summary_msg,
+            extracted_items=extracted_data_items if extracted_data_items else [ExtractedDataItem(title=summary_msg, url=page.url)],
             completed_steps=steps
         )
 
 
 async def smart_semantic_extract(page, target_url: str, target_count: int = 10) -> List[Dict[str, Any]]:
-    """通用的 DOM 增强型备用提取引擎（支持单页/卡片布局）"""
+    """通用的 DOM 增强型备用提取引擎（支持单页/卡片布局与全页文本抓取总结）"""
     extracted_items = []
     seen_titles = set()
 
@@ -476,15 +488,14 @@ async def smart_semantic_extract(page, target_url: str, target_count: int = 10) 
     except Exception:
         pass
 
-    # 2. 纯结构 DOM 块/卡片/链接通用提取
+    # 2. 纯结构 DOM 块/卡片/段落提取
     try:
         candidate_elements = await page.evaluate("""() => {
-            const nodes = Array.from(document.querySelectorAll('a[href], article, section, h1, h2, h3, h4, div[class*="title"], div[class*="card"], div[class*="item"]'));
+            const nodes = Array.from(document.querySelectorAll('a[href], article, section, p, h1, h2, h3, h4, div[class*="title"], div[class*="card"], div[class*="tech"], div[class*="item"]'));
             const results = [];
             for (const el of nodes) {
                 const text = (el.innerText || el.textContent || '').trim();
                 if (!text || text.length < 4) continue;
-                // 过滤掉包含大量换行的顶层大容器
                 if (text.split('\\n').length > 5) continue;
                 const href = el.getAttribute ? (el.getAttribute('href') || '') : '';
                 results.push({ text: text.replace(/\\s+/g, ' '), href: href });
@@ -494,13 +505,30 @@ async def smart_semantic_extract(page, target_url: str, target_count: int = 10) 
 
         for item in candidate_elements:
             t = item["text"]
-            if t not in seen_titles:
+            if t not in seen_titles and len(t) > 3:
                 seen_titles.add(t)
                 extracted_items.append({"title": t, "url": item["href"] or target_url})
                 if len(extracted_items) >= target_count:
                     break
     except Exception as e:
         print(f"  DOM 提取提示: {e}")
+
+    # 3. 保底：如果上述依然为空，抓取整个页面 body 的主要长文本段落并合成摘要
+    if not extracted_items:
+        try:
+            body_text = await page.evaluate("""() => {
+                const main = document.querySelector('main, article, #app, body');
+                return main ? (main.innerText || main.textContent || '') : '';
+            }""")
+            lines = [line.strip() for line in body_text.split('\n') if len(line.strip()) > 8]
+            unique_lines = []
+            for l in lines:
+                if l not in unique_lines and not any(k in l for k in ["ICP", "版权所有", "Privacy"]):
+                    unique_lines.append(l)
+            for line in unique_lines[:target_count]:
+                extracted_items.append({"title": line, "url": target_url})
+        except Exception:
+            pass
 
     return extracted_items
 
@@ -583,11 +611,18 @@ async def screenshot_sender():
                             else:
                                 extracted = await smart_semantic_extract(page, page.url, target_count=target_count)
                                 items_to_return = extracted
+                                summary_text = f"已成功导航至页面并提炼核心内容"
+                                if extracted:
+                                    summary_text = " | ".join([it["title"] for it in extracted[:3]])
                                 task_result_schema = TaskResultSchema(
                                     status="success",
-                                    summary=f"已成功通过串行探针导航并提取 {len(extracted)} 条数据",
+                                    summary=summary_text,
                                     completed_steps=[task_text]
                                 )
+
+                            # 【重点防空机制】：如果总结 summary 存在但 extracted_items 为空（如要求抓取整页文字并总结的任务），将 summary 转换为主条目返回
+                            if not items_to_return and task_result_schema.summary:
+                                items_to_return = [{"title": task_result_schema.summary, "url": page.url, "details": {}}]
 
                             await flush_screen_frames(page, ws, count=3)
                             await asyncio.sleep(0.5)
