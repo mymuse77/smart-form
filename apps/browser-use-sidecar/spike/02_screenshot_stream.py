@@ -149,22 +149,35 @@ def extract_target_count(text: str) -> int:
 def parse_serial_steps(text: str) -> List[str]:
     """
     解析自然语言文本中的串行多步骤操作：
-    支持中文/英文标点、句号、逗号、'并'、'然后'、'接着'、空格前缀谓语等拆分
+    先保护 URL 不被句号拆分，再支持中文/英文标点、句号、逗号、'并'、'然后'、'接着'、空格前缀谓语等拆分
     """
-    raw_steps = re.split(r'(?:\r?\n|;|；|。|\.|\d+[\.、])', text)
+    urls = []
+    def replace_url(match):
+        urls.append(match.group(0))
+        return f"__URL_HOLDER_{len(urls)-1}__"
+
+    protected_text = re.sub(r'https?://[a-zA-Z0-9.\-]+(?::\d+)?(?:/[^\s\u4e00-\u9fa5,"\'“”‘’()]*)?', replace_url, text)
+
+    raw_steps = re.split(r'(?:\r?\n|;|；|。|\d+[\.、])', protected_text)
     steps = [s.strip() for s in raw_steps if s.strip()]
 
     if len(steps) <= 1:
-        raw_steps = re.split(r'(?:,|,|，|、|并|然后再|然后|接着|之后|再下一步|再|\s+(?=点击|选择|进入|抓取|拉取|从上往下|滚动|总结))', text)
+        raw_steps = re.split(r'(?:,|,|，|、|并|然后再|然后|接着|之后|再下一步|再|\s+(?=点击|选择|进入|抓取|拉取|从上往下|滚动|总结))', protected_text)
         steps = [s.strip() for s in raw_steps if s.strip()]
 
-    return steps if steps else [text.strip()]
+    restored_steps = []
+    for step in steps:
+        for idx, original_url in enumerate(urls):
+            step = step.replace(f"__URL_HOLDER_{idx}__", original_url)
+        if step.strip():
+            restored_steps.append(step.strip())
+
+    return restored_steps if restored_steps else [text.strip()]
 
 
 def extract_all_click_targets(text: str) -> List[str]:
     """
-    从自然语言中按顺序提取所有连续点击/悬停/滚动目标，例如：
-    '打开... 点击"技术"菜单，点击“纯电技术”，从上往下拉取...' -> ['技术', '纯电技术', '拉取滚动']
+    从自然语言中按顺序提取所有连续点击/悬停/滚动目标
     """
     targets = []
     quoted = re.findall(r'(?:点击|选择|进入)?["“\'`]([^"”\'`]+)["”\'`]', text)
@@ -188,8 +201,7 @@ def extract_all_click_targets(text: str) -> List[str]:
 
 async def execute_sequential_clicks(page, targets: List[str], ws) -> bool:
     """
-    通用物理点击、Hover 与滚动连贯驱动器：
-    依次查找页面中匹配 target 的可交互节点，支持 hover 唤出下拉子菜单及模拟页面向下滚动拉取
+    通用物理点击、Hover 与滚动连贯驱动器
     """
     for target in targets:
         if target == "拉取滚动" or any(k in target for k in ["拉取", "滚动", "滑动", "从上往下"]):
@@ -312,8 +324,7 @@ async def broadcast_json(msg: dict):
 
 async def flush_screen_frames(page, ws, count: int = 3):
     """
-    视觉与回复同步节奏门 (Visual Rhythm Gate)：
-    向前端推送 N 帧最新画面，确保用户在 Chat 弹出回复前看到最新渲染
+    视觉与回复同步节奏门 (Visual Rhythm Gate)
     """
     for i in range(count):
         try:
@@ -358,13 +369,14 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
 
     steps = parse_serial_steps(serial_task_text)
     target_count = extract_target_count(serial_task_text)
-    print(f"  📋 解构出 {len(steps)} 个串行步骤: {steps}，期望抓取数量={target_count}")
+    is_summary_task = any(k in serial_task_text for k in ["总结", "文字内容", "全页", "介绍", "详情", "提炼"])
+
+    print(f"  📋 解构出 {len(steps)} 个串行步骤: {steps}，期望抓取数量={target_count} (是否全页总结任务={is_summary_task})")
 
     try:
         from langchain_openai import ChatOpenAI
         from browser_use import Agent
 
-        # 在 Class 级别添加 provider 属性，完美消除 AttributeError
         ChatOpenAI.provider = "openai"
 
         if DEEPSEEK_API_KEY:
@@ -391,18 +403,11 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
             prompt += f"步骤 {idx}: {s}\n"
 
         prompt += f"""
-关键要求：
-1. 严格按步骤顺序依次在页面上交互（导航 -> 过滤/滚动页面 -> 提取主体内容）。
-2. 请抓取页面【主体区域/文章列表区域】中的 {target_count} 条真实文章标题与对应超链接。
-"""
-
-        # 自然语言排除菜单/导航指示感知
-        if any(k in serial_task_text for k in ["排除菜单", "不要菜单", "过滤菜单", "非菜单", "不要导航", "主体内容", "不是菜单", "文章不是菜单"]):
-            prompt += """
-⛔ 强制排除规则（最高优先级）：
-- 用户明确要求排除菜单、导航栏、侧边栏及页脚文本！
-- 严禁抓取包含：'我的博客'、'我的园子'、'账号设置'、'会员中心'、'简洁模式'、'退出登录'、'首页'、'新闻'、'博问'、分类导航词等通用菜单项！
-- 只能提取网页【主体内容区域 / 文章列表区域】中的真实文章标题与对应超链接！
+通用法则（最高优先级）：
+1. 提取目标必须是网页【主体列表/Feed流卡片区域】中的真实商品推荐信息或真实文章标题或核心宣发技术段落！
+2. ⛔ 严禁抓取纯品牌标签或官网入口（如“华为/HUAWEI”、“小米/Xiaomi”、“苹果/Apple”、“Columbia美国官网”等）！
+3. 严禁抓取导航菜单、分类列表、侧边栏品牌热搜或页脚版权！
+4. 如果任务包含“总结/抓取文字内容”，请在 summary 字段中生成详细条理的【全页技术/内容总结】，并在 extracted_items 中抓取 {target_count} 条核心文字段落！
 """
 
         agent = Agent(
@@ -452,10 +457,10 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
 
     except Exception as err:
         print(f"  ⚠ Browser Use Agent 执行逻辑提示: {err}")
-        fallback_items = await smart_semantic_extract(page, page.url, target_count=target_count)
-        summary_msg = "已成功导航至当前页面并提炼主体文章内容"
+        fallback_items = await smart_semantic_extract(page, page.url, target_count=target_count, is_summary_task=is_summary_task)
+        summary_msg = "已成功导航至当前页面并提炼主体内容"
         if fallback_items:
-            summary_msg = "页面主体文章：" + " | ".join([it["title"] for it in fallback_items[:3]])
+            summary_msg = "【页面核心内容提炼与总结】：\n" + "\n".join([f"{idx+1}. {it['title']}" for idx, it in enumerate(fallback_items[:5])])
 
         extracted_data_items = [
             ExtractedDataItem(title=it["title"], url=it["url"]) for it in fallback_items
@@ -468,12 +473,47 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
         )
 
 
-async def smart_semantic_extract(page, target_url: str, target_count: int = 10) -> List[Dict[str, Any]]:
-    """通用的 DOM 增强型备用提取引擎（具备导航/菜单过滤与主体文章识别）"""
+async def smart_semantic_extract(page, target_url: str, target_count: int = 10, is_summary_task: bool = False) -> List[Dict[str, Any]]:
+    """通用的 DOM 增强型备用提取引擎（支持全页正文段落抓取与技术亮点提炼）"""
     extracted_items = []
     seen_titles = set()
 
-    # 1. 尝试表格结构
+    # 1. 优先处理：全页宣发页面/长文本段落提炼（如理想汽车纯电技术、单页宣发）
+    if is_summary_task or "lixiang.com" in target_url:
+        try:
+            paragraphs = await page.evaluate("""() => {
+                const nodes = Array.from(document.querySelectorAll('main, article, section, div, p, h1, h2, h3, h4'));
+                const results = [];
+                const anyInText = (t, keys) => keys.some(k => t.includes(k));
+                const blacklist = ["ICP", "版权所有", "Privacy", "网站地图", "联系我们", "沪ICP", "京ICP", "首页", "服务", "菜单"];
+
+                for (const el of nodes) {
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    const text = (el.innerText || el.textContent || '').trim();
+                    // 抓取长度在 10 ~ 250 字之间且含有中文的有效宣发段落
+                    if (text && text.length >= 10 && text.length <= 250 && /[\\u4e00-\\u9fa5]/.test(text)) {
+                        if (anyInText(text, blacklist)) continue;
+                        // 排除子节点过多的父容器
+                        if (el.children && el.children.length > 8) continue;
+                        results.push(text.replace(/\\s+/g, ' '));
+                    }
+                }
+                return results;
+            }""")
+
+            for p in paragraphs:
+                if p not in seen_titles and not any(p in existing or existing in p for existing in seen_titles):
+                    seen_titles.add(p)
+                    extracted_items.append({"title": p, "url": target_url})
+                    if len(extracted_items) >= target_count:
+                        return extracted_items
+
+            if extracted_items:
+                return extracted_items
+        except Exception as p_err:
+            print(f"  段落文本提取提示: {p_err}")
+
+    # 2. 尝试表格结构
     try:
         rows = await page.query_selector_all("table tbody tr, table tr")
         if rows and len(rows) > 0:
@@ -492,35 +532,61 @@ async def smart_semantic_extract(page, target_url: str, target_count: int = 10) 
     except Exception:
         pass
 
-    # 2. 智能主域 DOM 元素提取（自动排除菜单与导航区域）
+    # 3. 智能主域 DOM 元素提取（兼容列表、文章卡片）
     try:
         candidate_elements = await page.evaluate("""() => {
-            const isMenuContainer = (el) => {
-                let cur = el;
+            const isInsideStructuralHeaderFooter = (el) => {
+                let cur = el.parentElement;
                 while (cur && cur !== document.body) {
                     const tag = (cur.tagName || '').toLowerCase();
-                    if (['nav', 'header', 'footer', 'aside'].includes(tag)) return true;
-                    const cls = (cur.className || '').toString().toLowerCase();
-                    const id = (cur.id || '').toString().toLowerCase();
-                    if (cls.includes('nav') || cls.includes('menu') || cls.includes('sidebar') || cls.includes('header') || cls.includes('footer') || cls.includes('user-bar')) return true;
-                    if (id.includes('nav') || id.includes('menu') || id.includes('sidebar') || id.includes('header') || id.includes('footer')) return true;
+                    if (['nav', 'header', 'footer'].includes(tag)) return true;
                     cur = cur.parentElement;
                 }
                 return false;
             };
 
-            const menuBlacklist = ["我的博客", "我的园子", "账号设置", "会员中心", "简洁模式", "退出登录", "登录", "注册", "首页", "新闻", "博问", "闪存", "班级", "所有随笔", "所有文章"];
+            const blacklist = [
+                "我的博客", "我的园子", "账号设置", "会员中心", "简洁模式", "退出登录", "登录", "注册",
+                "首页", "新闻", "博问", "闪存", "班级", "所有随笔", "所有文章", "ICP", "版权所有", "Privacy",
+                "亚马逊中国", "美团休闲生活", "京东全球购", "天猫国际官方直营", "别样海外购", "亚马逊海外购",
+                "京东国际joy", "Apple美国官网", "美国亚马逊", "Walmart", "海淘", "国内折扣",
+                "Columbia美国官网", "MOUNTAIN HARDWEAR美国官网", "steep&cheap", "华为/HUAWEI", "小米/Xiaomi",
+                "苹果/Apple", "荣耀/HONOR", "联想/Lenovo", "红米/REDMI", "华硕/ASUS"
+            ];
 
-            const nodes = Array.from(document.querySelectorAll('a[href], article, section, h1, h2, h3, h4, [class*="post-item"], [class*="entry-title"], [class*="article-title"]'));
+            const selectors = [
+                '.post-item-title', '.post-item a', '#post_list a', '.z-feed-title a', '.feed-block a', 
+                '.feed-title a', '.post-title a', '.entry-title a', '.card-title a', 'article a', 
+                'h1 a', 'h2 a', 'h3 a', 'h4 a', '[class*="title"] a', '[class*="post"] a', '[class*="card"] a'
+            ];
+            
+            let nodes = Array.from(document.querySelectorAll(selectors.join(',')));
+            if (nodes.length < 3) {
+                nodes = Array.from(document.querySelectorAll('a[href]'));
+            }
+
             const results = [];
             for (const el of nodes) {
-                if (isMenuContainer(el)) continue;
+                if (isInsideStructuralHeaderFooter(el)) continue;
                 const text = (el.innerText || el.textContent || '').trim();
-                if (!text || text.length < 5) continue;
-                if (menuBlacklist.some(b => text === b || text.includes(b))) continue;
-                if (text.split('\\n').length > 5) continue;
-                const href = el.getAttribute ? (el.getAttribute('href') || '') : '';
-                results.push({ text: text.replace(/\\s+/g, ' '), href: href });
+                
+                if (!text || text.length < 4) continue;
+                
+                if (text.includes('/') && text.split('/').length === 2 && text.length < 15) continue;
+                if (text.endsWith('官网') && text.length < 15) continue;
+                
+                if (blacklist.some(b => text === b || text.includes(b))) continue;
+                if (text.split('\\n').length > 4) continue;
+
+                let href = '';
+                try {
+                    href = el.getAttribute ? (el.getAttribute('href') || '') : '';
+                    if (href && href.startsWith('/')) {
+                        href = window.location.origin + href;
+                    }
+                } catch(e) {}
+
+                results.push({ text: text.replace(/\\s+/g, ' '), href: href || window.location.href });
             }
             return results;
         }""")
@@ -604,6 +670,7 @@ async def screenshot_sender():
                                 await execute_sequential_clicks(page, click_targets, ws)
 
                             target_count = extract_target_count(task_text)
+                            is_summary_task = any(k in task_text for k in ["总结", "文字内容", "全页", "介绍", "详情", "提炼"])
 
                             if DEEPSEEK_API_KEY or OPENAI_API_KEY:
                                 task_result_schema = await run_browser_use_agent_serial(page, task_text, ws)
@@ -612,11 +679,11 @@ async def screenshot_sender():
                                     for item in task_result_schema.extracted_items
                                 ]
                             else:
-                                extracted = await smart_semantic_extract(page, page.url, target_count=target_count)
+                                extracted = await smart_semantic_extract(page, page.url, target_count=target_count, is_summary_task=is_summary_task)
                                 items_to_return = extracted
-                                summary_text = f"已成功导航至页面并提取 {len(extracted)} 条主体内容"
+                                summary_text = f"已成功导航至页面并提取 {len(extracted)} 条核心内容"
                                 if extracted:
-                                    summary_text = " | ".join([it["title"] for it in extracted[:3]])
+                                    summary_text = "【页面核心提炼】：\n" + "\n".join([f"{idx+1}. {it['title']}" for idx, it in enumerate(extracted[:5])])
                                 task_result_schema = TaskResultSchema(
                                     status="success",
                                     summary=summary_text,
