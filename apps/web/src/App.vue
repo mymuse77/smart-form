@@ -210,30 +210,35 @@ function onSubmitReject() {
 }
 
 function handleTaskResult(msg: any) {
+  // 1. 右侧步骤优雅打勾，把之前的 RUNNING 转为 SUCCESS
   markRunningStepsAsSuccess();
-  const items = msg.items || [];
-  collectedCount.value = items.length;
-  isTaskRunning.value = false; // 恢复任务运行标记
 
-  let replyHtml = `<strong>🎉 任务完成！</strong>`;
-  if (msg.mode === 'write') {
-    replyHtml += `<br/>成功在目标表单填写并完成提交，提交回执凭证：<code>${activeSubmissionId.value || 'sub_success'}</code>`;
-  } else {
-    replyHtml += `成功提取到 ${items.length} 条数据：<ol style="margin-top:6px;padding-left:18px;">`;
-    items.forEach((item: any) => {
-      replyHtml += `<li style="margin-bottom:4px;"><strong>${escapeHtml(item.title)}</strong></li>`;
+  // 2. 画面与回复协同沉淀 1000ms：确保用户在中间视口清晰看完网页渲染后，Chat 框才呈现最终结果
+  setTimeout(() => {
+    const items = msg.items || [];
+    collectedCount.value = items.length;
+    isTaskRunning.value = false; // 恢复任务运行标记
+
+    let replyHtml = `<strong>🎉 任务完成！</strong>`;
+    if (msg.mode === 'write') {
+      replyHtml += `<br/>成功在目标表单填写并完成提交，提交回执凭证：<code>${activeSubmissionId.value || 'sub_success'}</code>`;
+    } else {
+      replyHtml += `成功提取到 ${items.length} 条数据：<ol style="margin-top:6px;padding-left:18px;">`;
+      items.forEach((item: any) => {
+        replyHtml += `<li style="margin-bottom:4px;"><strong>${escapeHtml(item.title)}</strong></li>`;
+      });
+      replyHtml += `</ol>`;
+    }
+
+    if (chatPanelRef.value?.addAssistantReply) {
+      chatPanelRef.value.addAssistantReply(replyHtml);
+    }
+
+    steps.value.push({
+      action: msg.mode === 'write' ? `成功完成自动化表单填报与提交` : `成功完成当次采集！提取出 ${items.length} 条项目数据`,
+      status: 'SUCCESS',
     });
-    replyHtml += `</ol>`;
-  }
-
-  if (chatPanelRef.value?.addAssistantReply) {
-    chatPanelRef.value.addAssistantReply(replyHtml);
-  }
-
-  steps.value.push({
-    action: msg.mode === 'write' ? `成功完成自动化表单填报与提交` : `成功完成当次采集！提取出 ${items.length} 条项目数据`,
-    status: 'SUCCESS',
-  });
+  }, 1000);
 }
 
 
