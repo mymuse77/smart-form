@@ -51,7 +51,7 @@ def bring_window_to_foreground(keyword: str = "Chrome") -> bool:
                 buff = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buff, length + 1)
                 title = buff.value
-                if any(k in title for k in [keyword, "Chromium", "小红书", "什么值得买", "验证", "Example", "理想"]):
+                if any(k in title for k in [keyword, "Chromium", "小红书", "什么值得买", "验证", "Example", "理想", "博客园"]):
                     found_hwnd.append(hwnd)
             return True
 
@@ -143,7 +143,7 @@ def extract_target_count(text: str) -> int:
                 return num
         except ValueError:
             pass
-    return 5
+    return 10
 
 
 def parse_serial_steps(text: str) -> List[str]:
@@ -167,18 +167,15 @@ def extract_all_click_targets(text: str) -> List[str]:
     '打开... 点击"技术"菜单，点击“纯电技术”，从上往下拉取...' -> ['技术', '纯电技术', '拉取滚动']
     """
     targets = []
-    # 1. 优先提取包含引号的: 点击"xxx" / 点击“xxx”
     quoted = re.findall(r'(?:点击|选择|进入)?["“\'`]([^"”\'`]+)["”\'`]', text)
     for q in quoted:
         clean_q = q.strip().replace("菜单", "").replace("按钮", "")
         if clean_q and clean_q not in targets:
             targets.append(clean_q)
 
-    # 2. 检查是否有明确的页面滚动拉取指示
     if any(k in text for k in ["拉取", "从上往下", "向下滚动", "滚动页面", "滑动"]):
         targets.append("拉取滚动")
 
-    # 3. 补充提取无引号的: 点击xxx
     if not targets:
         unquoted = re.findall(r'点击\s*([^\s,，;；"”\'`\.。!！?？]+?)(?:[,\s，;；\.。!！?？]|然后|并|再|$)', text)
         for u in unquoted:
@@ -367,7 +364,7 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
         from langchain_openai import ChatOpenAI
         from browser_use import Agent
 
-        # 为 ChatOpenAI 类挂载 provider 类属性，完美消除 browser-use 尝试访问 llm.provider 时报的 AttributeError
+        # 在 Class 级别添加 provider 属性，完美消除 AttributeError
         ChatOpenAI.provider = "openai"
 
         if DEEPSEEK_API_KEY:
@@ -395,9 +392,17 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
 
         prompt += f"""
 关键要求：
-1. 严格按步骤顺序依次在页面上交互（导航 -> 点击/悬停菜单 -> 切换子菜单 -> 从上往下拉取/滚动页面 -> 提取内容并总结）。
-2. 如果遇到下拉菜单，请先将鼠标悬停(hover)到一级菜单上，待下拉浮层出现后再点击对应的二级菜单。
-3. 请详细提取和总结页面中的主要文字与技术亮点内容，并返回结构化输出（包含 summary 摘要与 extracted_items 清单）。
+1. 严格按步骤顺序依次在页面上交互（导航 -> 过滤/滚动页面 -> 提取主体内容）。
+2. 请抓取页面【主体区域/文章列表区域】中的 {target_count} 条真实文章标题与对应超链接。
+"""
+
+        # 自然语言排除菜单/导航指示感知
+        if any(k in serial_task_text for k in ["排除菜单", "不要菜单", "过滤菜单", "非菜单", "不要导航", "主体内容", "不是菜单", "文章不是菜单"]):
+            prompt += """
+⛔ 强制排除规则（最高优先级）：
+- 用户明确要求排除菜单、导航栏、侧边栏及页脚文本！
+- 严禁抓取包含：'我的博客'、'我的园子'、'账号设置'、'会员中心'、'简洁模式'、'退出登录'、'首页'、'新闻'、'博问'、分类导航词等通用菜单项！
+- 只能提取网页【主体内容区域 / 文章列表区域】中的真实文章标题与对应超链接！
 """
 
         agent = Agent(
@@ -447,11 +452,10 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
 
     except Exception as err:
         print(f"  ⚠ Browser Use Agent 执行逻辑提示: {err}")
-        # 当 LLM Agent 执行遇到未预期异常时，优雅回退到 DOM 全页长文本提炼
         fallback_items = await smart_semantic_extract(page, page.url, target_count=target_count)
-        summary_msg = "已成功导航至当前页面并提炼核心内容"
+        summary_msg = "已成功导航至当前页面并提炼主体文章内容"
         if fallback_items:
-            summary_msg = "页面核心提炼：" + " | ".join([it["title"] for it in fallback_items[:3]])
+            summary_msg = "页面主体文章：" + " | ".join([it["title"] for it in fallback_items[:3]])
 
         extracted_data_items = [
             ExtractedDataItem(title=it["title"], url=it["url"]) for it in fallback_items
@@ -465,7 +469,7 @@ async def run_browser_use_agent_serial(page, serial_task_text: str, ws) -> TaskR
 
 
 async def smart_semantic_extract(page, target_url: str, target_count: int = 10) -> List[Dict[str, Any]]:
-    """通用的 DOM 增强型备用提取引擎（支持单页/卡片布局与全页文本抓取总结）"""
+    """通用的 DOM 增强型备用提取引擎（具备导航/菜单过滤与主体文章识别）"""
     extracted_items = []
     seen_titles = set()
 
@@ -488,14 +492,32 @@ async def smart_semantic_extract(page, target_url: str, target_count: int = 10) 
     except Exception:
         pass
 
-    # 2. 纯结构 DOM 块/卡片/段落提取
+    # 2. 智能主域 DOM 元素提取（自动排除菜单与导航区域）
     try:
         candidate_elements = await page.evaluate("""() => {
-            const nodes = Array.from(document.querySelectorAll('a[href], article, section, p, h1, h2, h3, h4, div[class*="title"], div[class*="card"], div[class*="tech"], div[class*="item"]'));
+            const isMenuContainer = (el) => {
+                let cur = el;
+                while (cur && cur !== document.body) {
+                    const tag = (cur.tagName || '').toLowerCase();
+                    if (['nav', 'header', 'footer', 'aside'].includes(tag)) return true;
+                    const cls = (cur.className || '').toString().toLowerCase();
+                    const id = (cur.id || '').toString().toLowerCase();
+                    if (cls.includes('nav') || cls.includes('menu') || cls.includes('sidebar') || cls.includes('header') || cls.includes('footer') || cls.includes('user-bar')) return true;
+                    if (id.includes('nav') || id.includes('menu') || id.includes('sidebar') || id.includes('header') || id.includes('footer')) return true;
+                    cur = cur.parentElement;
+                }
+                return false;
+            };
+
+            const menuBlacklist = ["我的博客", "我的园子", "账号设置", "会员中心", "简洁模式", "退出登录", "登录", "注册", "首页", "新闻", "博问", "闪存", "班级", "所有随笔", "所有文章"];
+
+            const nodes = Array.from(document.querySelectorAll('a[href], article, section, h1, h2, h3, h4, [class*="post-item"], [class*="entry-title"], [class*="article-title"]'));
             const results = [];
             for (const el of nodes) {
+                if (isMenuContainer(el)) continue;
                 const text = (el.innerText || el.textContent || '').trim();
-                if (!text || text.length < 4) continue;
+                if (!text || text.length < 5) continue;
+                if (menuBlacklist.some(b => text === b || text.includes(b))) continue;
                 if (text.split('\\n').length > 5) continue;
                 const href = el.getAttribute ? (el.getAttribute('href') || '') : '';
                 results.push({ text: text.replace(/\\s+/g, ' '), href: href });
@@ -505,30 +527,13 @@ async def smart_semantic_extract(page, target_url: str, target_count: int = 10) 
 
         for item in candidate_elements:
             t = item["text"]
-            if t not in seen_titles and len(t) > 3:
+            if t not in seen_titles and len(t) >= 4:
                 seen_titles.add(t)
                 extracted_items.append({"title": t, "url": item["href"] or target_url})
                 if len(extracted_items) >= target_count:
                     break
     except Exception as e:
         print(f"  DOM 提取提示: {e}")
-
-    # 3. 保底：如果上述依然为空，抓取整个页面 body 的主要长文本段落并合成摘要
-    if not extracted_items:
-        try:
-            body_text = await page.evaluate("""() => {
-                const main = document.querySelector('main, article, #app, body');
-                return main ? (main.innerText || main.textContent || '') : '';
-            }""")
-            lines = [line.strip() for line in body_text.split('\n') if len(line.strip()) > 8]
-            unique_lines = []
-            for l in lines:
-                if l not in unique_lines and not any(k in l for k in ["ICP", "版权所有", "Privacy"]):
-                    unique_lines.append(l)
-            for line in unique_lines[:target_count]:
-                extracted_items.append({"title": line, "url": target_url})
-        except Exception:
-            pass
 
     return extracted_items
 
@@ -593,7 +598,6 @@ async def screenshot_sender():
                                 task_queue.task_done()
                                 continue
 
-                            # 1. 尝试提取指令中的所有物理点击/悬停/滚动目标（如 ['技术', '纯电技术', '拉取滚动']）
                             click_targets = extract_all_click_targets(task_text)
                             if click_targets:
                                 print(f"🖱️ 捕获到 {len(click_targets)} 个串行物理点击/悬停/滚动目标: {click_targets}")
@@ -601,7 +605,6 @@ async def screenshot_sender():
 
                             target_count = extract_target_count(task_text)
 
-                            # 2. 如果配置了 LLM，则由 Browser Use Agent 继续深度驱动并结构化抽取
                             if DEEPSEEK_API_KEY or OPENAI_API_KEY:
                                 task_result_schema = await run_browser_use_agent_serial(page, task_text, ws)
                                 items_to_return = [
@@ -611,7 +614,7 @@ async def screenshot_sender():
                             else:
                                 extracted = await smart_semantic_extract(page, page.url, target_count=target_count)
                                 items_to_return = extracted
-                                summary_text = f"已成功导航至页面并提炼核心内容"
+                                summary_text = f"已成功导航至页面并提取 {len(extracted)} 条主体内容"
                                 if extracted:
                                     summary_text = " | ".join([it["title"] for it in extracted[:3]])
                                 task_result_schema = TaskResultSchema(
@@ -620,7 +623,6 @@ async def screenshot_sender():
                                     completed_steps=[task_text]
                                 )
 
-                            # 【重点防空机制】：如果总结 summary 存在但 extracted_items 为空（如要求抓取整页文字并总结的任务），将 summary 转换为主条目返回
                             if not items_to_return and task_result_schema.summary:
                                 items_to_return = [{"title": task_result_schema.summary, "url": page.url, "details": {}}]
 
