@@ -113,6 +113,13 @@ function connectWebSocket() {
           if (msg.type === 'url_changed' && msg.url) {
             currentUrl.value = msg.url;
             markRunningStepsAsSuccess();
+          } else if (msg.type === 'step_executed' && msg.action) {
+            markRunningStepsAsSuccess();
+            steps.value.push({
+              action: msg.action,
+              locator: msg.locator,
+              status: 'SUCCESS',
+            });
           } else if (msg.type === 'human_intervention_required') {
             handleHumanInterventionRequired(msg);
           } else if (msg.type === 'waiting_approval_submit') {
@@ -120,6 +127,7 @@ function connectWebSocket() {
           } else if (msg.type === 'task_result') {
             handleTaskResult(msg);
           }
+
         } catch {
           // ignore
         }

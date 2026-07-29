@@ -345,7 +345,54 @@ async def generic_auto_fill_form(page, kv_data: dict[str, str]):
 
 
 
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
+
+async def run_browser_use_agent(page, task_text: str, ws) -> list[dict]:
+    """
+    接入官方 Browser Use Agent 核心引擎：
+    由多模态/推理 LLM 全权理解自然语言复合指令，自主完成 页面导航 -> 元素识别 -> 物理点击 -> 动态抽取 全流程
+    """
+    print(f"🤖 [Browser Use Agent] 启动 LLM 驱动多步推理 Agent: \"{task_text}\"")
+    try:
+        from langchain_openai import ChatOpenAI
+        from browser_use import Agent
+
+        llm = ChatOpenAI(
+            model=DEEPSEEK_MODEL,
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL,
+            temperature=0.0,
+        )
+        setattr(llm, "provider", "openai")
+
+
+        agent = Agent(
+            task=task_text,
+            llm=llm,
+            page=page
+        )
+
+        print("  ▶ 正在由 Browser Use LLM 进行多步步骤规划与 DOM 视觉对齐...")
+        history = await agent.run(max_steps=8)
+        await flush_screen_frames(page, ws, count=3)
+
+        final_res = history.final_result() or "已成功由 Browser Use 完成多步交互与采集"
+        print(f"  ✅ Browser Use Agent 物理执行完毕，最终结果: {final_res}")
+
+        lines = [line.strip() for line in str(final_res).split("\n") if line.strip()]
+        items = [{"title": line, "url": page.url} for line in lines[:10]]
+        return items if items else [{"title": str(final_res), "url": page.url}]
+
+    except Exception as err:
+        print(f"  ⚠ Browser Use Agent 调度执行微提示: {err}")
+        return []
+
+
 async def detect_captcha_or_login(page) -> bool:
+
     """
     通用反爬与人机验证风控感知器：
     零硬编码黑名单，基于 HTTP 状态、独立 Canvas 遮罩、跨域 Safe iFrame 结构自动探测
@@ -364,7 +411,18 @@ async def detect_captcha_or_login(page) -> bool:
 
 
 
+def extract_click_target(text: str) -> str | None:
+    """从自然语言指令中通用匹配 '点击"xxx"' 或 '点击xxx' 动作"""
+    match = re.search(r'点击["“\'`]?([^"”\'`\s,，;；]+)["”\'`]?', text)
+    if match:
+        target = match.group(1).strip()
+        if target not in ["按钮", "链接"]:
+            return target
+    return None
+
+
 async def flush_screen_frames(page, ws, count: int = 3):
+
     """
     视觉与回复同步节奏门 (Visual Rhythm Gate)：
     强制向前端推刷 N 帧最新全屏高清晰度截图，确保用户在 Chat 弹出回复前，
@@ -405,9 +463,9 @@ async def screenshot_sender():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-        current_loaded_url = "http://localhost:8080/table.html"
-        await page.goto(current_loaded_url)
-        print(f"▶ 截图采集端启动，初始加载 {current_loaded_url}")
+        current_loaded_url = ""
+        print("▶ 截图采集端启动就绪，保持初始待机状态，等待下发任务...")
+
 
         try:
             async with websockets.connect(f"ws://localhost:{WS_PORT}") as ws:
@@ -494,10 +552,54 @@ async def screenshot_sender():
                                 else:
                                     print("❌ 用户拒绝了表单提交！")
                             else:
-                                target_count = extract_target_count(task_text)
-                                print(f"🤖 智能解析目标提取数量: {target_count} 条，启动 AI 抽取引擎 (带菜单过滤)...")
+                                is_multi_step = any(k in task_text for k in ["点击", "然后", "再", "进入", "找到"])
+                                if DEEPSEEK_API_KEY and is_multi_step:
+                                    print("🤖 捕获到复合多步交互指令，启动官方 Browser Use Agent 全权自主执行...")
+                                    extracted_items = await run_browser_use_agent(page, task_text, ws)
+                                else:
+                                    click_target = extract_click_target(task_text)
+                                    if click_target:
+                                        print(f"🖱️ [通用点击探针] 捕获到物理点击指令: \"{click_target}\" ...")
+                                        await broadcast_json({
+                                            "type": "step_executed",
+                                            "action": f"驱动 Chromium 自动化寻址物理点击目标: \"{click_target}\"",
+                                            "locator": f"click(\"{click_target}\")"
+                                        })
 
-                                extracted_items = await smart_semantic_extract(page, target, target_count=target_count)
+                                        click_success = False
+                                        try:
+                                            locator = page.get_by_text(click_target, exact=False).first
+                                            if await locator.count() > 0:
+                                                click_elem = locator
+                                            else:
+                                                click_elem = await page.query_selector(f"a:has-text('{click_target}'), button:has-text('{click_target}')")
+
+                                            if click_elem:
+                                                try:
+                                                    await click_elem.click(timeout=4000)
+                                                except Exception:
+                                                    await click_elem.click(force=True, timeout=4000)
+
+                                                print(f"  ✓ 成功驱动 Chromium 物理点击 [{click_target}]，等待目标页面渲染...")
+                                                await broadcast_json({
+                                                    "type": "step_executed",
+                                                    "action": f"成功驱动 Chromium 物理点击网页目标: \"{click_target}\"",
+                                                    "locator": f"click(\"{click_target}\")"
+                                                })
+                                                await asyncio.sleep(3.0)
+                                                await flush_screen_frames(page, ws, count=3)
+                                            else:
+                                                print(f"  ⚠ 未在当前页面找到包含文本 \"{click_target}\" 的可点击控件")
+                                        except Exception as click_err:
+                                            print(f"  物理点击执行提示: {click_err}")
+
+
+
+                                    target_count = extract_target_count(task_text)
+                                    print(f"🤖 智能解析目标提取数量: {target_count} 条，启动 AI 抽取引擎 (带菜单过滤)...")
+                                    extracted_items = await smart_semantic_extract(page, target, target_count=target_count)
+
+
 
                                 # 抽取完成后，先刷帧确保页面呈现出当前浏览位置，再延时 1s 回传结果，保证视觉同步
                                 await flush_screen_frames(page, ws, count=3)
