@@ -13,7 +13,11 @@
         @send-task="onSendTask"
         @stop-task="onStopTask"
       />
-      <WorkspacePanel :current-url="currentUrl" :frame-src="frameSrc" />
+      <WorkspacePanel
+        :current-url="currentUrl"
+        :frame-src="frameSrc"
+        :has-started-task="hasStartedTask"
+      />
       <ExecutionPanel :steps="steps" />
     </div>
     <BottomBar
@@ -42,13 +46,15 @@ import BottomBar from './components/BottomBar.vue';
 import SubmitPreviewPanel from './components/SubmitPreviewPanel.vue';
 
 const agentState = ref('RUNNING');
-const currentUrl = ref('http://localhost:8080/table.html');
+const currentUrl = ref('');
 const frameSrc = ref('');
-const collectedCount = ref(4);
+const hasStartedTask = ref(false);
+const collectedCount = ref(0);
 const errorCount = ref(0);
-const runtimeStr = ref('00:02:15');
+const runtimeStr = ref('00:00:00');
 const isTaskRunning = ref(false);
 const chatPanelRef = ref<any>(null);
+
 
 // 填报提交预览控制
 const submitPreviewVisible = ref(false);
@@ -262,7 +268,10 @@ function onResume() {
 }
 
 function onSendTask(taskText: string) {
-  // 1. 强隔离：清空重置右侧步骤明细，只保留当次会话过程
+  // 1. 触发任务标记，无缝切换到实时画面推送
+  hasStartedTask.value = true;
+
+  // 2. 强隔离：清空重置右侧步骤明细，只保留当次会话过程
   steps.value = [];
 
   const isWriteMode = taskText.includes('填') || taskText.includes('写') || taskText.includes('提交') || taskText.includes('fill');
@@ -275,8 +284,9 @@ function onSendTask(taskText: string) {
     currentUrl.value = 'http://localhost:8080/fill-form.html';
   }
 
-  // 2. 标记当前任务在运行中 (显示停止图标，禁用重复发送)
+  // 3. 标记当前任务在运行中
   isTaskRunning.value = true;
+
 
   steps.value.push({
     action: `[新会话] 接收自然语言<sup>${taskMode === 'write' ? '填报' : '采集'}</sup>指令: "${taskText}"`,

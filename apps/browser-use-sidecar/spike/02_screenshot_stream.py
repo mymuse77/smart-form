@@ -66,8 +66,9 @@ def bring_window_to_foreground(keyword: str = "Chrome") -> bool:
 
 
 WS_PORT = 8765
-TARGET_FPS = 2
-IDLE_FPS = 0.5
+TARGET_FPS = 5
+IDLE_FPS = 2
+
 
 def encode_frame(
     task_id: str,
@@ -363,6 +364,29 @@ async def detect_captcha_or_login(page) -> bool:
 
 
 
+async def flush_screen_frames(page, ws, count: int = 3):
+    """
+    视觉与回复同步节奏门 (Visual Rhythm Gate)：
+    强制向前端推刷 N 帧最新全屏高清晰度截图，确保用户在 Chat 弹出回复前，
+    中间视口已完完全全呈现最新的网页渲染画面。
+    """
+    for i in range(count):
+        try:
+            screenshot_bytes = await page.screenshot(type="jpeg", quality=75, animations="disabled")
+            frame_data = encode_frame(
+                task_id="sync-frame-task",
+                frame_seq=i,
+                captured_at=time.time(),
+                width=1280,
+                height=720,
+                image_bytes=screenshot_bytes
+            )
+            await ws.send(frame_data)
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+
+
 async def screenshot_sender():
     global pending_nav_url, pending_task_text, agent_paused
     await asyncio.sleep(2)
@@ -410,9 +434,10 @@ async def screenshot_sender():
                                 current_loaded_url = target
                                 await broadcast_json({"type": "url_changed", "url": target})
 
-                            await asyncio.sleep(1.0)
-                            is_blocked = await detect_captcha_or_login(page)
+                            # 导航后同步刷 2 帧，确保用户优先看到新网页打开
+                            await flush_screen_frames(page, ws, count=2)
 
+                            is_blocked = await detect_captcha_or_login(page)
                             if is_blocked:
                                 print(f"⚠️ [反爬告警] 目标站点 ({target}) 触发了验证码/频控！自动切窗口至前台...")
                                 agent_paused = True
@@ -432,6 +457,9 @@ async def screenshot_sender():
                                 # 纯通用零硬编码：调用纯通用 DOM 智能探针自动探测与对齐填充
                                 await generic_auto_fill_form(page, kv_payload)
 
+                                # 填充后刷帧给前端，让用户看清输入的表单项
+                                await flush_screen_frames(page, ws, count=3)
+
                                 submission_id = f"sub_{int(time.time())}_{hashlib.md5(task_text.encode()).hexdigest()[:6]}"
                                 print(f"🛑 触发 WAITING_APPROVAL_SUBMIT 机制，等待前端提交确认 (submissionId={submission_id})...")
 
@@ -443,7 +471,6 @@ async def screenshot_sender():
                                     "formData": kv_payload
                                 })
 
-
                                 # 等待用户在前端二步授权弹窗中确认
                                 await submit_approval_event.wait()
 
@@ -451,6 +478,9 @@ async def screenshot_sender():
                                     print("✅ 用户已授权提交！执行物理按钮点击...")
                                     if await page.query_selector("#submit-btn"):
                                         await page.click("#submit-btn")
+
+                                    # 提交后强制刷帧 3 次，展示提交后的成功回执界面
+                                    await flush_screen_frames(page, ws, count=3)
                                     await asyncio.sleep(1.0)
 
                                     await broadcast_json({
@@ -469,6 +499,10 @@ async def screenshot_sender():
 
                                 extracted_items = await smart_semantic_extract(page, target, target_count=target_count)
 
+                                # 抽取完成后，先刷帧确保页面呈现出当前浏览位置，再延时 1s 回传结果，保证视觉同步
+                                await flush_screen_frames(page, ws, count=3)
+                                await asyncio.sleep(1.0)
+
                                 print(f"✅ 成功精准提取到 {len(extracted_items)} 条数据，回传 Chat 框...")
                                 await broadcast_json({
                                     "type": "task_result",
@@ -481,6 +515,7 @@ async def screenshot_sender():
 
                         except Exception as nav_err:
                             print(f"⚠ 跳转/提取异常: {nav_err}")
+
 
                     try:
                         screenshot_bytes = await page.screenshot(
