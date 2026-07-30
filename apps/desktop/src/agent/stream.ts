@@ -1,11 +1,15 @@
 import { Page } from 'playwright';
-import { WebSocket } from 'ws';
 import * as crypto from 'crypto';
 
 export interface StreamConfig {
   targetFps?: number;
   idleFps?: number;
   changeThreshold?: number; // 哈希或像素差异阈值
+}
+
+export interface FrameSink {
+  isAvailable(): boolean;
+  sendFrame(frame: Buffer): boolean;
 }
 
 export class ScreencastStreamer {
@@ -16,7 +20,7 @@ export class ScreencastStreamer {
 
   constructor(
     private page: Page,
-    private ws: WebSocket,
+    private sink: FrameSink,
     private taskId: string,
     private config: StreamConfig = {}
   ) {}
@@ -41,7 +45,7 @@ export class ScreencastStreamer {
   }
 
   private async captureAndSend(): Promise<void> {
-    if (!this.isStreaming || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.isStreaming || !this.sink.isAvailable()) {
       this.scheduleNextFrame(1000);
       return;
     }
@@ -73,13 +77,13 @@ export class ScreencastStreamer {
           buffer.length
         );
         const packet = Buffer.concat([binaryHeader, buffer]);
-        this.ws.send(packet);
+        this.sink.sendFrame(packet);
       }
 
       const elapsed = Date.now() - tStart;
       const nextDelay = Math.max(0, intervalMs - elapsed);
       this.scheduleNextFrame(nextDelay);
-    } catch (err) {
+    } catch {
       this.scheduleNextFrame(1000);
     }
   }
@@ -96,7 +100,7 @@ export class ScreencastStreamer {
     const taskIdBytes = Buffer.from(taskId, 'utf-8');
 
     // 格式：[4B Magic][1B Version][1B Flags][4B Seq][8B Timestamp][2B W][2B H][4B TaskIdLen][TaskId][4B ImageLen]
-    const header = Buffer.alloc(26 + taskIdBytes.length);
+    const header = Buffer.alloc(30 + taskIdBytes.length);
     let offset = 0;
 
     magic.copy(header, offset); offset += 4;

@@ -1,57 +1,62 @@
-import { ActionTrace } from './trace';
-import { LocatorGenerator } from './locator';
+import type { CapabilityStep } from '@smart-form/contracts';
+import type { ActionTrace, TraceStep } from './trace';
 
-export class PlaywrightFillCompiler {
-  public static compileToTypeScript(trace: ActionTrace): string {
-    const lines: string[] = [
-      `// Auto-generated Playwright Form Filler Script (Write Mode)`,
-      `// Task ID: ${trace.taskId}`,
-      `// Created At: ${new Date(trace.createdAt).toISOString()}`,
-      ``,
-      `import { Page } from 'playwright';`,
-      `import { DefaultFillerContext } from '@smart-form/capability-sdk';`,
-      ``,
-      `export async function runFiller(page: Page, formData: Record<string, any>): Promise<{ success: boolean; submissionId?: string }> {`,
-      `  const fillerCtx = new DefaultFillerContext(page, '${trace.taskId}');`,
-      `  await page.goto('${trace.targetUrl}', { waitUntil: 'domcontentloaded' });`,
-      ``,
-    ];
+function selectorFor(step: TraceStep): string {
+  const selector = step.target?.selector;
+  if (!selector) {
+    throw new Error(`Trace step ${step.stepId} cannot be compiled without a stable selector`);
+  }
+  return selector;
+}
 
-    trace.steps.forEach((step) => {
-      const locatorStr = LocatorGenerator.generatePlaywrightLocator(step.target);
+/**
+ * Converts validated exploration traces into the declarative capability
+ * runtime. It intentionally cannot emit arbitrary TypeScript.
+ */
+export class DeclarativeFillCompiler {
+  static compileToProgram(trace: ActionTrace): CapabilityStep[] {
+    return trace.steps.flatMap((step): CapabilityStep[] => {
       switch (step.actionType) {
         case 'navigate':
-          if (step.url) lines.push(`  await page.goto('${step.url}');`);
-          break;
+          if (!step.url) throw new Error(`Navigate step ${step.stepId} is missing a URL`);
+          return [{ type: 'navigate', url: step.url }];
         case 'click':
-          lines.push(`  await ${locatorStr}.click();`);
-          break;
-        case 'fill': {
-          const fieldKey = step.fieldId || 'value';
-          lines.push(`  await fillerCtx.fillField('${step.target.selector || 'input'}', formData['${fieldKey}'] ?? '${step.value || ''}');`);
-          break;
-        }
-        case 'human_secret_input':
-          lines.push(`  // HUMAN_INTERVENTION_REQUIRED: Sensitive input for ${step.target?.label || 'secret'}`);
-          lines.push(`  await page.pause();`);
-          break;
+          return [{ type: 'click', selector: selectorFor(step) }];
+        case 'fill':
+          return [{
+            type: 'fill',
+            selector: selectorFor(step),
+            value: step.fieldId
+              ? { source: 'input', key: step.fieldId }
+              : { source: 'literal', value: step.value ?? '' },
+          }];
+        case 'select':
+          return [{
+            type: 'select',
+            selector: selectorFor(step),
+            value: step.fieldId
+              ? { source: 'input', key: step.fieldId }
+              : { source: 'literal', value: step.value ?? '' },
+          }];
         case 'commit':
         case 'submit':
-          lines.push(`  // WAITING_APPROVAL_SUBMIT: Human approval required before clicking submit`);
-          lines.push(`  const approval = await fillerCtx.requestSubmitApproval(formData);`);
-          lines.push(`  if (approval.approved) {`);
-          lines.push(`    await ${locatorStr}.click();`);
-          lines.push(`    return { success: true, submissionId: approval.submissionId };`);
-          lines.push(`  }`);
-          break;
+          return [{
+            type: 'submit',
+            selector: selectorFor(step),
+            snapshotKeys: step.fieldId ? [step.fieldId] : [],
+          }];
+        case 'human_secret_input':
+          throw new Error(
+            `Trace step ${step.stepId} requires human input and cannot be compiled into a capability`,
+          );
+        case 'extract':
+          throw new Error(
+            `Trace step ${step.stepId} lacks an extraction schema and cannot be compiled automatically`,
+          );
       }
     });
-
-    lines.push(``);
-    lines.push(`  return { success: true };`);
-    lines.push(`}`);
-    lines.push(``);
-
-    return lines.join('\n');
   }
 }
+
+/** @deprecated Use DeclarativeFillCompiler. */
+export const PlaywrightFillCompiler = DeclarativeFillCompiler;

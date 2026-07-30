@@ -9,6 +9,7 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
+    "@smart-form/contracts": "workspace:*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

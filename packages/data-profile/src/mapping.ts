@@ -1,6 +1,4 @@
 import { z } from 'zod';
-import { BuiltinTransformType } from './transforms';
-
 export const FieldMappingSchema = z.object({
   targetFieldId: z.string().min(1, '目标表单字段 ID 不能为空'),
   sourceKey: z.string().min(1, '数据源 Key 不能为空'),

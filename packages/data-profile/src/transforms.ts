@@ -7,7 +7,10 @@ export type BuiltinTransformType =
   | 'to_number';
 
 export class TransformEngine {
-  public static applyTransform(value: any, transform: BuiltinTransformType = 'identity'): any {
+  public static applyTransform(
+    value: unknown,
+    transform: BuiltinTransformType = 'identity',
+  ): unknown {
     if (value === null || value === undefined) return '';
 
     switch (transform) {
@@ -18,7 +21,7 @@ export class TransformEngine {
       case 'lowercase':
         return String(value).toLowerCase();
       case 'date_format_iso': {
-        const d = new Date(value);
+        const d = new Date(String(value));
         return isNaN(d.getTime()) ? String(value) : d.toISOString().split('T')[0];
       }
       case 'to_number': {

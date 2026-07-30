@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AgentCommand, AgentReport } from './agent-protocol.js';
 
 // ─── WebSocket 消息类型 ─────────────────────────────────
 // 基于设计文档 §13 + 详细设计文档 §15.3
@@ -25,6 +26,7 @@ export const ServerMessageType = z.enum([
   'capability.match',
   'policy.updated',
   'session.expiring',
+  'agent.report_ack',
 ]);
 export type ServerMessageType = z.infer<typeof ServerMessageType>;
 
@@ -37,6 +39,28 @@ export const WsMessage = z.object({
   payload: z.record(z.unknown()),
 });
 export type WsMessage = z.infer<typeof WsMessage>;
+
+export const RealtimeRole = z.enum(['agent', 'web']);
+export type RealtimeRole = z.infer<typeof RealtimeRole>;
+
+export const RealtimeHello = z.object({
+  role: RealtimeRole,
+  accessToken: z.string().min(1),
+  deviceId: z.string().min(1).optional(),
+});
+export type RealtimeHello = z.infer<typeof RealtimeHello>;
+
+export const TaskCommandMessage = WsMessage.extend({
+  type: z.literal('task.command'),
+  payload: AgentCommand,
+});
+export type TaskCommandMessage = z.infer<typeof TaskCommandMessage>;
+
+export const AgentReportMessage = WsMessage.extend({
+  type: z.literal('agent.report'),
+  payload: AgentReport,
+});
+export type AgentReportMessage = z.infer<typeof AgentReportMessage>;
 
 /** 截图帧二进制头信息 */
 export interface FrameHeader {

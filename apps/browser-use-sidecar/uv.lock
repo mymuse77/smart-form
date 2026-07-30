@@ -289,7 +289,7 @@ wheels = [
 [[package]]
 name = "browser-use-sidecar"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "browser-use" },
     { name = "langchain-openai" },

@@ -23,7 +23,10 @@ export interface CapabilityScoreResult {
 export class CapabilitySearchEngine {
   public static calculateScore(query: SearchQuery, capability: CapabilityManifest): CapabilityScoreResult {
     // 1. domain 匹配 (0.3)
-    const domainMatch = query.domain.toLowerCase() === capability.domain.toLowerCase();
+    const requestedDomain = query.domain.toLowerCase();
+    const domainMatch = capability.site.domains.some(
+      (domain) => domain.toLowerCase() === requestedDomain,
+    );
     const domainScore = domainMatch ? 1.0 * 0.3 : 0.0;
 
     // 2. module 匹配 (0.2)

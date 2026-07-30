@@ -1,7 +1,7 @@
 [project]
 name = "browser-use-sidecar"
 version = "0.1.0"
-description = "Browser Use Python Sidecar — 阶段 0 技术 Spike"
+description = "Browser Use worker controlled by the Smart Form Desktop agent"
 requires-python = ">=3.11"
 dependencies = [
     "browser-use>=0.2.0",
@@ -17,3 +17,17 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
 ]
+
+[project.scripts]
+smart-form-sidecar = "smart_form_sidecar.worker:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smart_form_sidecar"]

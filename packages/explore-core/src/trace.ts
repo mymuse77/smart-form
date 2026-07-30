@@ -8,7 +8,15 @@ export interface ActionTarget {
 
 export interface TraceStep {
   stepId: string;
-  actionType: 'navigate' | 'click' | 'fill' | 'select' | 'extract' | 'human_secret_input';
+  actionType:
+    | 'navigate'
+    | 'click'
+    | 'fill'
+    | 'select'
+    | 'extract'
+    | 'human_secret_input'
+    | 'commit'
+    | 'submit';
   target?: ActionTarget;
   value?: string;
   url?: string;

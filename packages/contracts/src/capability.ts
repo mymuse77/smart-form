@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { TaskMode } from './task.js';
+import { RuntimeCompatibility } from './artifact.js';
 
 // ─── 风险等级 ───────────────────────────────────────────
 // 基于设计文档 §7.2：read 默认 low；write 默认 high，不可自行降级
@@ -24,7 +25,7 @@ export type CapabilityStatus = z.infer<typeof CapabilityStatus>;
 // 基于设计文档 §7.1～7.2
 
 export const CapabilityManifest = z.object({
-  schemaVersion: z.literal('1.0'),
+  schemaVersion: z.enum(['1.0', '1.1']),
   capabilityId: z.string(),
   version: z.string(),
   tenantId: z.string(),
@@ -38,11 +39,8 @@ export const CapabilityManifest = z.object({
     module: z.string(),
   }),
 
-  runtime: z.object({
-    language: z.literal('typescript'),
-    playwrightRange: z.literal('pinned-by-platform'),
-    browser: z.literal('chromium'),
-    mode: z.array(z.enum(['cdp', 'native-playwright'])),
+  runtime: RuntimeCompatibility.extend({
+    language: z.enum(['typescript', 'declarative-v1']),
   }),
 
   permissions: z.object({

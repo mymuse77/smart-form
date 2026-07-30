@@ -5,7 +5,7 @@ export type ExportFormat = 'jsonl' | 'csv';
 
 export class DataExporter {
   public static exportData(
-    records: Record<string, any>[],
+    records: Record<string, unknown>[],
     outputPath: string,
     format: ExportFormat = 'jsonl'
   ): boolean {
@@ -35,7 +35,7 @@ export class DataExporter {
         fs.writeFileSync(outputPath, lines.join('\n'), 'utf-8');
       }
       return true;
-    } catch (err) {
+    } catch {
       return false;
     }
   }

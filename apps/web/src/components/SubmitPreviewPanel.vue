@@ -59,7 +59,7 @@ defineProps<{
   visible: boolean;
   targetUrl: string;
   submissionId: string;
-  formData: Record<string, any>;
+  formData: Record<string, unknown>;
 }>();
 
 const emit = defineEmits(['approve', 'reject']);
@@ -209,4 +209,3 @@ th {
   100% { transform: scale(1); }
 }
 </style>
-

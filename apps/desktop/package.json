@@ -9,15 +9,21 @@
     "dev": "tsc -b && electron ."
   },
   "dependencies": {
+    "@smart-form/capability-sdk": "workspace:^",
     "@smart-form/contracts": "workspace:*",
     "@smart-form/event-schema": "workspace:*",
+    "@smart-form/playwright-runner": "workspace:*",
     "@smart-form/task-schema": "workspace:*",
     "playwright": "^1.50.0",
+    "sql.js": "^1.14.1",
+    "write-file-atomic": "^8.0.0",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "@types/sql.js": "^1.4.11",
+    "@types/write-file-atomic": "^4.0.3",
     "@types/ws": "^8.5.10",
     "electron": "^31.0.0",
     "typescript": "^5.5.4"

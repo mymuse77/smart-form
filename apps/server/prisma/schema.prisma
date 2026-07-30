@@ -1,5 +1,5 @@
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -7,41 +7,130 @@ generator client {
   provider = "prisma-client-js"
 }
 
+enum ResourceKind {
+  capability
+  prompt
+  skill
+  rule
+}
+
+enum ResourceStatus {
+  DRAFT
+  VALIDATING
+  ACTIVE
+  DEGRADED
+  RETIRED
+  REJECTED
+}
+
+enum DeviceStatus {
+  ACTIVE
+  REVOKED
+}
+
 model Tenant {
-  id        String   @id @default(uuid())
+  id        String            @id @default(uuid())
   name      String
-  createdAt DateTime @default(now())
+  createdAt DateTime          @default(now())
+  resources ManagedResource[]
+  devices   Device[]
+  tasks     Task[]
 }
 
-model Capability {
-  id            String              @id @default(uuid())
+model Device {
+  id                  String       @id
+  tenantId            String
+  tenant              Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name                String
+  status              DeviceStatus @default(ACTIVE)
+  evidencePublicKey   String
+  evidenceSigningKeyId String
+  lastSeenAt          DateTime?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  @@index([tenantId, status])
+}
+
+model ManagedResource {
+  id            String                   @id @default(uuid())
   tenantId      String
-  name          String
-  domain        String
-  mode          String              @default("read")
-  currentVersion String
-  status        String              @default("DRAFT")
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  versions      CapabilityVersion[]
+  tenant        Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  resourceKey   String
+  kind          ResourceKind
+  activeVersion String?
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  versions      ManagedResourceVersion[]
+
+  @@unique([tenantId, resourceKey])
+  @@index([tenantId, kind])
 }
 
-model CapabilityVersion {
-  id           String     @id @default(uuid())
-  capabilityId String
-  capability   Capability @relation(fields: [capabilityId], references: [id])
+model ManagedResourceVersion {
+  id          String            @id @default(uuid())
+  resourceId  String
+  resource    ManagedResource   @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  tenantId    String
+  version     String
+  name        String
+  status      ResourceStatus
+  criteria    Json
+  artifact    Json
+  metadata    Json
+  payload     Json
+  createdBy   String
+  createdAt   DateTime          @default(now())
+
+  @@unique([resourceId, version])
+  @@index([tenantId, status])
+}
+
+model Task {
+  id             String   @id
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deviceId       String
+  mode           String
+  state          String
+  revision       Int      @default(1)
+  definition     Json
+  stateVersion   Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([tenantId, deviceId, state])
+}
+
+model Artifact {
+  internalId   String       @id @default(uuid())
+  artifactId   String
+  tenantId     String
+  kind         ResourceKind
   version      String
-  checksum     String
-  codeContent  String
-  status       String     @default("VALIDATING")
-  createdAt    DateTime   @default(now())
+  sha256       String
+  signature    String
+  signingKeyId String
+  contentLength Int
+  storageKey   String
+  createdAt    DateTime     @default(now())
+
+  @@unique([tenantId, kind, artifactId, version])
+  @@index([tenantId, kind])
 }
 
 model AuditLog {
-  id        String   @id @default(uuid())
-  tenantId  String
-  userId    String
-  action    String
-  resource  String
-  timestamp DateTime @default(now())
+  id          String   @id @default(uuid())
+  tenantId    String
+  actorType   String
+  actorId     String
+  action      String
+  resource    String
+  resourceId  String
+  requestId   String?
+  detail      Json
+  timestamp   DateTime @default(now())
+
+  @@index([tenantId, timestamp])
+  @@index([tenantId, resource, resourceId])
 }

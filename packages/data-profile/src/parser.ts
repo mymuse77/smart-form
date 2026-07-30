@@ -60,11 +60,11 @@ export class DataSourceParser {
     }
 
     const headers = lines[0].split(',').map((h) => h.trim());
-    const records: Record<string, any>[] = [];
+    const records: Record<string, unknown>[] = [];
 
     for (let i = 1; i < lines.length; i++) {
       const values = lines[i].split(',').map((v) => v.trim());
-      const record: Record<string, any> = {};
+      const record: Record<string, unknown> = {};
       headers.forEach((h, idx) => {
         record[h] = values[idx] ?? '';
       });

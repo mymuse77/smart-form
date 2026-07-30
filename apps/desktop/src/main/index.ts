@@ -1,16 +1,41 @@
-import { app, BrowserWindow } from 'electron';
-import { WebSocketServer, WebSocket } from 'ws';
+import { app, BrowserWindow, ipcMain } from 'electron';
+import * as path from 'node:path';
 import { AgentChromiumManager } from '../agent/chromium';
 import { ScreencastStreamer } from '../agent/stream';
-import { ControlManager } from '../agent/control';
+import { AgentRealtimeClient } from '../agent/realtime-client';
+import { ArtifactLoader } from '../agent/artifact-loader';
+import { loadArtifactTrust } from '../agent/artifact-trust';
+import { BrowserControlAuthority } from '../agent/control-lease';
+import { RunnerExecutorAdapter } from '../agent/runner-executor';
+import { SidecarProcessClient } from '../agent/sidecar-client';
+import { SidecarExecutorAdapter } from '../agent/sidecar-executor';
+import {
+  DesktopTaskOrchestrator,
+  type AutomationExecutorAdapter,
+} from '../agent/task-orchestrator';
+import type { AutomationExecutor } from '../agent/control-lease';
 import { LocalDatabaseManager } from './db';
 
 let mainWindow: BrowserWindow | null = null;
 let chromiumManager: AgentChromiumManager | null = null;
 let streamer: ScreencastStreamer | null = null;
+let localDatabase: LocalDatabaseManager | null = null;
+let realtimeClient: AgentRealtimeClient | null = null;
+let sidecarClient: SidecarProcessClient | null = null;
+let taskOrchestrator: DesktopTaskOrchestrator | null = null;
 let connectedClientsCount = 0;
 
-function getAgentDashboardHTML(clientCount: number, cdpPort: number, wsPort: number) {
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character]!);
+}
+
+function getAgentDashboardHTML(clientCount: number, cdpPort: number, serverUrl: string) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -91,9 +116,9 @@ function getAgentDashboardHTML(clientCount: number, cdpPort: number, wsPort: num
 
   <div class="grid">
     <div class="card">
-      <div class="card-title">WebSocket 端口</div>
-      <div class="card-value">ws://127.0.0.1:${wsPort}</div>
-      <div class="card-sub">已连接 Web 客户端: <strong id="client-count" style="color:#38bdf8">${clientCount}</strong></div>
+      <div class="card-title">云端控制面</div>
+      <div class="card-value" style="font-size:14px">${escapeHtml(serverUrl)}</div>
+      <div class="card-sub">服务端连接: <strong id="client-count" style="color:#38bdf8">${clientCount ? 'ONLINE' : 'OFFLINE'}</strong></div>
     </div>
     <div class="card">
       <div class="card-title">CDP 调试端口</div>
@@ -103,13 +128,13 @@ function getAgentDashboardHTML(clientCount: number, cdpPort: number, wsPort: num
   </div>
 
   <div class="actions">
-    <button class="btn" onclick="window.electronAPI ? window.electronAPI.focusChrome() : location.reload()">置顶 Chromium 窗口</button>
+    <button class="btn" onclick="window.smartFormAgent && window.smartFormAgent.focusChromium()">置顶 Chromium 窗口</button>
     <button class="btn btn-secondary" onclick="location.reload()">刷新 Agent 状态</button>
   </div>
 
   <div class="log-box" id="logs">
     [${new Date().toLocaleTimeString()}] Companion Agent 初始化完成...<br/>
-    [${new Date().toLocaleTimeString()}] WebSocket 服务已建立，等待 http://localhost:3000 连接...
+    [${new Date().toLocaleTimeString()}] 正在建立到控制面的出站 WebSocket 连接...
   </div>
 </body>
 </html>`;
@@ -122,13 +147,19 @@ async function createWindow() {
     resizable: false,
     title: 'Smart-Form Companion Agent',
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
 
-  const cdpPort = parseInt(process.env.CDP_PORT || '9222', 10);
-  const html = getAgentDashboardHTML(connectedClientsCount, cdpPort, 8765);
+  const cdpPort = parseInt(process.env.CDP_PORT || '0', 10);
+  const html = getAgentDashboardHTML(
+    connectedClientsCount,
+    cdpPort,
+    process.env.SERVER_WS_URL || 'ws://127.0.0.1:3001/ws',
+  );
   mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 
   mainWindow.on('closed', () => {
@@ -138,79 +169,176 @@ async function createWindow() {
 
 function updateDashboardUI() {
   if (mainWindow) {
-    const cdpPort = parseInt(process.env.CDP_PORT || '9222', 10);
-    const html = getAgentDashboardHTML(connectedClientsCount, cdpPort, 8765);
+    const cdpPort = chromiumManager?.getSession()
+      ? Number(new URL(chromiumManager.getSession()!.cdpEndpoint).port)
+      : parseInt(process.env.CDP_PORT || '0', 10);
+    const html = getAgentDashboardHTML(
+      connectedClientsCount,
+      cdpPort,
+      process.env.SERVER_WS_URL || 'ws://127.0.0.1:3001/ws',
+    );
     mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
   }
 }
 
 async function startAgentServices() {
-  const db = new LocalDatabaseManager();
-  const control = new ControlManager();
+  localDatabase = await LocalDatabaseManager.open(path.join(app.getPath('userData'), 'agent-state'));
+  const tenantId = process.env.TENANT_ID || 'local-tenant';
+  const deviceId = process.env.DEVICE_ID || 'local-device';
+  const workspaceId = process.env.WORKSPACE_ID || 'local-workspace';
+  const serverWsUrl = process.env.SERVER_WS_URL || 'ws://127.0.0.1:3001/ws';
+  const accessToken = process.env.DEVICE_ACCESS_TOKEN
+    || (process.env.NODE_ENV === 'production' ? '' : 'smart-form-local-dev-token');
+  if (!accessToken) {
+    throw new Error('DEVICE_ACCESS_TOKEN is required in production');
+  }
 
-  const cdpPort = parseInt(process.env.CDP_PORT || '9222', 10);
+  const configuredCdpPort = process.env.CDP_PORT
+    ? parseInt(process.env.CDP_PORT, 10)
+    : undefined;
   chromiumManager = new AgentChromiumManager({
-    cdpPort,
-    tenantId: 'default',
-    workspaceId: 'workspace_01',
+    cdpPort: configuredCdpPort,
+    tenantId,
+    workspaceId,
+    userDataBaseDir: path.join(app.getPath('userData'), 'profiles'),
     headless: false,
   });
 
-  try {
-    const { page } = await chromiumManager.launchOrConnect();
-    console.log(`[Agent] Chromium launched with CDP port ${cdpPort}`);
-
-    const wss = new WebSocketServer({ port: 8765 });
-    console.log('[Agent] WebSocket server listening on ws://127.0.0.1:8765');
-
-    wss.on('connection', (ws: WebSocket) => {
-      connectedClientsCount++;
-      updateDashboardUI();
-      console.log('[Agent] Web Client connected to WebSocket');
-
-      if (page) {
-        if (streamer) streamer.stop();
-        streamer = new ScreencastStreamer(page, ws, 'task_demo_01');
-        streamer.start();
-      }
-
-      ws.on('message', async (data: Buffer | string) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          console.log('[Agent] Received message from Web UI:', msg);
-          if (msg.type === 'NAVIGATE' && msg.url) {
-            await page.goto(msg.url);
-          }
-        } catch {
-          // 二进制推流包处理忽略
-        }
-      });
-
-      ws.on('close', () => {
-        connectedClientsCount = Math.max(0, connectedClientsCount - 1);
-        updateDashboardUI();
-        console.log('[Agent] Web Client disconnected');
-        if (streamer) {
-          streamer.stop();
-          streamer = null;
-        }
-      });
+  const { page, cdpEndpoint } = await chromiumManager.launch();
+  console.log(`[Agent] Managed Chromium launched at ${cdpEndpoint}`);
+  const trustedSigningKeys = await loadArtifactTrust({
+    configuredKeysJson: process.env.ARTIFACT_SIGNING_PUBLIC_KEYS_JSON,
+    nodeEnv: process.env.NODE_ENV || 'development',
+    serverWsUrl,
+    accessToken,
+  });
+    const artifactOrigin = new URL(serverWsUrl);
+    artifactOrigin.protocol = artifactOrigin.protocol === 'wss:' ? 'https:' : 'http:';
+    const artifactLoader = new ArtifactLoader({
+      environment: {
+        tenantId,
+        deviceId,
+        protocolVersion: '1.0.0',
+        sdkVersion: process.env.CAPABILITY_SDK_VERSION || '0.1.0',
+        playwrightVersion: require('playwright/package.json').version as string,
+        nodeVersion: process.versions.node,
+        browser: 'chromium',
+        executionMode: 'cdp',
+      },
+      trustedSigningKeys,
+      accessToken,
+      localArtifactRoot: path.resolve(process.env.ARTIFACT_ROOT || 'data/artifacts'),
+      allowedHttpsOrigins: [artifactOrigin.origin],
     });
-  } catch (err) {
-    console.error('[Agent] Failed to start Chromium or Agent services:', err);
-  }
+    realtimeClient = new AgentRealtimeClient({
+      serverUrl: serverWsUrl,
+      accessToken,
+      tenantId,
+      deviceId,
+      protocolVersion: '1.0.0',
+    }, localDatabase);
+    realtimeClient.onConnected(() => {
+      connectedClientsCount = 1;
+      updateDashboardUI();
+    });
+    realtimeClient.onDisconnected(() => {
+      connectedClientsCount = 0;
+      updateDashboardUI();
+    });
+    realtimeClient.onError((error) => {
+      console.error('[Agent] Realtime error:', error.message);
+    });
+    const sidecarExecutable = process.env.SIDECAR_EXECUTABLE
+      || (process.env.NODE_ENV === 'production' ? '' : 'uv');
+    if (!sidecarExecutable) {
+      throw new Error('SIDECAR_EXECUTABLE is required in production');
+    }
+    const sidecarCwd = path.resolve(
+      process.env.SIDECAR_WORKING_DIRECTORY || 'apps/browser-use-sidecar',
+    );
+    const sidecarArgs = process.env.SIDECAR_ARGS_JSON
+      ? JSON.parse(process.env.SIDECAR_ARGS_JSON) as string[]
+      : ['run', 'python', '-m', 'smart_form_sidecar.worker'];
+    if (!Array.isArray(sidecarArgs) || sidecarArgs.some((value) => typeof value !== 'string')) {
+      throw new Error('SIDECAR_ARGS_JSON must be a JSON string array');
+    }
+    sidecarClient = new SidecarProcessClient({
+      executable: sidecarExecutable,
+      args: sidecarArgs,
+      cwd: sidecarCwd,
+      onDiagnostic: (message) => console.warn(`[Sidecar] ${message}`),
+    });
+    const frames = {
+      start: (taskId: string) => {
+        streamer?.stop();
+        streamer = new ScreencastStreamer(page, realtimeClient!, taskId);
+        streamer.start();
+      },
+      stop: () => streamer?.stop(),
+    };
+    taskOrchestrator = new DesktopTaskOrchestrator({
+      tenantId,
+      deviceId,
+      protocolVersion: '1.0.0',
+      page,
+      database: localDatabase,
+      artifactLoader,
+      control: new BrowserControlAuthority(),
+      executors: new Map<AutomationExecutor, AutomationExecutorAdapter>([
+        ['playwright-runner', new RunnerExecutorAdapter()],
+        ['browser-use-sidecar', new SidecarExecutorAdapter(
+          sidecarClient,
+          cdpEndpoint,
+          () => chromiumManager!.getTaskTargetId(),
+        )],
+      ]),
+      frames,
+      reports: realtimeClient,
+      probeBrowser: async () => ({
+        url: page.url(),
+        title: await page.title(),
+        activeTargetId: await chromiumManager!.getTaskTargetId(),
+      }),
+    });
+  realtimeClient.onCommand((command) => {
+    void taskOrchestrator!.handle(command).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[Agent] Command handling failed: ${message}`);
+    });
+  });
+  await realtimeClient.start().catch((error: Error) => {
+    if (process.env.NODE_ENV === 'production') throw error;
+    console.warn(`[Agent] Control plane is not available yet: ${error.message}`);
+  });
 }
 
-app.whenReady().then(async () => {
+void app.whenReady().then(async () => {
+  ipcMain.handle('agent:focus-chromium', async () => {
+    const page = chromiumManager?.getTaskPage();
+    if (!page) return false;
+    await page.bringToFront();
+    return true;
+  });
   await createWindow();
   await startAgentServices();
+}).catch((error: unknown) => {
+  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  console.error(`[Agent] Fatal startup failure: ${message}`);
+  app.quit();
 });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     if (chromiumManager) {
-      chromiumManager.close();
+      void chromiumManager.close();
     }
-    app.quit();
+    void localDatabase?.close().finally(() => app.quit());
   }
+});
+
+app.on('before-quit', () => {
+  streamer?.stop();
+  realtimeClient?.stop();
+  void sidecarClient?.shutdown();
+  ipcMain.removeHandler('agent:focus-chromium');
 });
