@@ -25,25 +25,53 @@ export class AgentChromiumManager {
       fs.mkdirSync(profilePath, { recursive: true });
     }
 
-    // 使用 persistent context 确保带有独立 Profile，且开放 CDP 调试端口
-    this.context = await chromium.launchPersistentContext(profilePath, {
-      headless: this.config.headless ?? false,
-      args: [
-        `--remote-debugging-port=${this.config.cdpPort}`,
-        '--remote-debugging-address=127.0.0.1',
-        '--no-first-run',
-        '--no-default-browser-check',
-      ],
-      viewport: { width: 1280, height: 720 },
-    });
+    // 1. 优先尝试连接已存在的 CDP 调试端口
+    try {
+      this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${this.config.cdpPort}`);
+      const contexts = this.browser.contexts();
+      if (contexts.length > 0) {
+        this.context = contexts[0];
+        const pages = this.context.pages();
+        this.taskPage = pages.length > 0 ? pages[0] : await this.context.newPage();
+        console.log(`[ChromiumManager] Successfully connected to existing Chromium over CDP at 127.0.0.1:${this.config.cdpPort}`);
+        return { page: this.taskPage, cdpPort: this.config.cdpPort };
+      }
+    } catch {
+      // 端口未监听，准备拉起全新的 persistent context 实例
+    }
 
-    const pages = this.context.pages();
-    this.taskPage = pages.length > 0 ? pages[0] : await this.context.newPage();
+    const commonArgs = [
+      `--remote-debugging-port=${this.config.cdpPort}`,
+      '--remote-debugging-address=127.0.0.1',
+      '--no-first-run',
+      '--no-default-browser-check',
+    ];
 
-    return {
-      page: this.taskPage,
-      cdpPort: this.config.cdpPort,
-    };
+    // 2. 依次尝试：Playwright 内置 Chromium ➔ 本地原生 Chrome ➔ 本地原生 Edge
+    const launchOptionsList = [
+      { headless: this.config.headless ?? false, args: commonArgs, viewport: { width: 1280, height: 720 } },
+      { headless: this.config.headless ?? false, channel: 'chrome', args: commonArgs, viewport: { width: 1280, height: 720 } },
+      { headless: this.config.headless ?? false, channel: 'msedge', args: commonArgs, viewport: { width: 1280, height: 720 } },
+    ];
+
+    let lastError: any = null;
+    for (const options of launchOptionsList) {
+      try {
+        this.context = await chromium.launchPersistentContext(profilePath, options as any);
+        const pages = this.context.pages();
+        this.taskPage = pages.length > 0 ? pages[0] : await this.context.newPage();
+        console.log(`[ChromiumManager] Successfully launched Chromium with ${options.channel ? 'channel=' + options.channel : 'default chromium'}`);
+        return {
+          page: this.taskPage,
+          cdpPort: this.config.cdpPort,
+        };
+      } catch (err: any) {
+        lastError = err;
+      }
+    }
+
+    console.error(`[ChromiumManager] Error launching Chromium:`, lastError?.message || lastError);
+    throw lastError;
   }
 
   public getTaskPage(): Page | null {
@@ -55,6 +83,10 @@ export class AgentChromiumManager {
       await this.context.close();
       this.context = null;
       this.taskPage = null;
+    }
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = null;
     }
   }
 }

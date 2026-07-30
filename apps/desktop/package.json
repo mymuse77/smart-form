@@ -5,7 +5,8 @@
   "main": "dist/main/index.js",
   "scripts": {
     "build": "tsc -b",
-    "dev": "tsc -b --watch"
+    "start": "electron .",
+    "dev": "tsc -b && electron ."
   },
   "dependencies": {
     "@smart-form/contracts": "workspace:*",
