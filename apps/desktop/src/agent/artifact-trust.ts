@@ -46,21 +46,29 @@ export async function loadArtifactTrust(
   endpoint.pathname = '/v1/artifacts/signing-keys/current';
   endpoint.search = '';
   endpoint.hash = '';
-  const response = await (options.fetchImpl ?? fetch)(endpoint, {
-    headers: { authorization: `Bearer ${options.accessToken}` },
-    redirect: 'error',
-  });
-  if (!response.ok) {
-    throw new Error(`Unable to load development artifact signing key: HTTP ${response.status}`);
+  try {
+    const response = await (options.fetchImpl ?? fetch)(endpoint, {
+      headers: { authorization: `Bearer ${options.accessToken}` },
+      redirect: 'error',
+    });
+    if (!response.ok) {
+      throw new Error(`Unable to load development artifact signing key: HTTP ${response.status}`);
+    }
+    const payload = await response.json() as Record<string, unknown>;
+    if (
+      typeof payload.keyId !== 'string'
+      || payload.algorithm !== 'Ed25519'
+      || typeof payload.publicKeyPem !== 'string'
+    ) {
+      throw new Error('Control plane returned an invalid signing-key document');
+    }
+    return new Map([[payload.keyId, createPublicKey(payload.publicKeyPem)]]);
+  } catch (err: any) {
+    if (options.nodeEnv !== 'production') {
+      console.warn(`[ArtifactTrust] Warning: Could not reach control-plane endpoint (${err?.message || err}). Running in standalone dev mode.`);
+      return new Map();
+    }
+    throw err;
   }
-  const payload = await response.json() as Record<string, unknown>;
-  if (
-    typeof payload.keyId !== 'string'
-    || payload.algorithm !== 'Ed25519'
-    || typeof payload.publicKeyPem !== 'string'
-  ) {
-    throw new Error('Control plane returned an invalid signing-key document');
-  }
-  return new Map([[payload.keyId, createPublicKey(payload.publicKeyPem)]]);
 }
 

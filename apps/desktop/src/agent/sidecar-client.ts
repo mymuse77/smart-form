@@ -73,7 +73,7 @@ export class SidecarProcessClient {
       const child = spawn(this.config.executable, this.config.args, {
         cwd: this.config.cwd,
         env: buildSidecarEnvironment(this.config.environment ?? process.env),
-        shell: false,
+        shell: process.platform === 'win32',
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

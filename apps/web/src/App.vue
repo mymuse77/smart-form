@@ -187,7 +187,12 @@ async function onSendTask(message: string) {
     });
   } catch (error) {
     isTaskRunning.value = false;
-    appendError(error instanceof Error ? error.message : String(error));
+    const errMsg = error instanceof Error ? error.message : String(error);
+    if (errMsg.includes('Failed to fetch') || errMsg.includes('ERR_CONNECTION_REFUSED') || errMsg.includes('fetch')) {
+      appendError(`无法连接到控制面服务 (${apiBaseUrl})。请确保已在终端启动 Server 后端：pnpm dev:server`);
+    } else {
+      appendError(errMsg);
+    }
   }
 }
 

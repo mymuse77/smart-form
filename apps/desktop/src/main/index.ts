@@ -301,7 +301,10 @@ async function startAgentServices() {
       }),
     });
   realtimeClient.onCommand((command) => {
-    void taskOrchestrator!.handle(command).catch((error: unknown) => {
+    console.log(`[Agent] Received command from control-plane: ${command.type} (TaskId: ${command.taskId})`);
+    void taskOrchestrator!.handle(command).then(() => {
+      console.log(`[Agent] Successfully handled command ${command.type} for task ${command.taskId}`);
+    }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`[Agent] Command handling failed: ${message}`);
     });
